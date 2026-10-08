@@ -10,32 +10,71 @@ export const changePasswordSchema = z.object({
   newPassword: z.string().min(6, 'New password must be at least 6 characters'),
 });
 
+export const sendOtpSchema = z.object({
+  phone: z.string().min(10, 'Valid 10-digit phone number is required').trim(),
+  email: z.string().email('Invalid email address').optional(),
+});
+
 export const adminRegisterSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters').trim(),
   email: z.string().email('Invalid email address').trim().toLowerCase(),
   phone: z.string().min(10, 'Valid phone number is required').trim(),
-  whatsappNumber: z.string().min(10, 'Valid WhatsApp number is required').trim(),
+  whatsappNumber: z.string().min(10).trim().optional(),
   password: z.string().min(6, 'Password must be at least 6 characters'),
   confirmPassword: z.string().min(6, 'Confirm password is required'),
   organizationName: z.string().min(2, 'Organization name is required').trim(),
+  otp: z.string().min(4, 'WhatsApp verification OTP is required').trim(),
 }).refine(data => data.password === data.confirmPassword, {
   message: "Passwords do not match",
   path: ["confirmPassword"],
 });
 
-export const userRegisterSchema = z.object({
-  name: z.string().min(2, 'Name must be at least 2 characters').trim(),
-  email: z.string().email('Invalid email address').trim().toLowerCase(),
-  phone: z.string().min(10, 'Valid phone number is required').trim(),
-  whatsappNumber: z.string().min(10, 'Valid WhatsApp number is required').trim(),
+// Admin adding student/user
+export const createStudentSchema = z.object({
+  name: z.string().min(2, 'Student name is required').trim(),
+  phone: z.string().min(10, 'Student phone number is required').trim(),
+  classCourse: z.string().optional().default(''),
+  address: z.string().optional().default(''),
+  photo: z.string().optional().default(''),
+  parentName: z.string().min(2, 'Parent / Guardian name is required').trim(),
+  parentPhone: z.string().min(10, 'Parent phone number is required').trim(),
+  aadharNumber: z.string().optional().default(''),
   dateOfBirth: z.string().optional(),
-  address: z.string().optional(),
-  emergencyContact: z.string().optional(),
-  photo: z.string().optional(),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
-  adminId: z.string().min(1, 'Library/Organization ID is required'),
+  gender: z.enum(['Male', 'Female', 'Other']).default('Male'),
+  branchId: z.string().min(1, 'Branch selection is required'),
+  batchId: z.string().min(1, 'Batch / session timing is required'),
+  seatId: z.string().min(1, 'Seat selection is required'),
+  planId: z.string().min(1, 'Admin plan selection is required'),
+  email: z.string().email().optional(),
+});
+
+// Legacy backward-compatibility alias
+export const userRegisterSchema = createStudentSchema.partial({
+  parentName: true,
+  parentPhone: true,
+  branchId: true,
+  batchId: true,
+  seatId: true,
+  planId: true,
+}).extend({
+  name: z.string().min(2).trim(),
+  phone: z.string().min(10).trim(),
+  password: z.string().optional(),
+  adminId: z.string().optional(),
+});
+
+export const batchSchema = z.object({
+  name: z.string().min(2, 'Batch name is required').trim(),
+  startTime: z.string().min(1, 'Start time is required').trim(),
+  endTime: z.string().min(1, 'End time is required').trim(),
   branchId: z.string().optional(),
-  planId: z.string().optional(),
+  description: z.string().optional().default(''),
+});
+
+export const renewPlanSchema = z.object({
+  planId: z.string().min(1, 'Plan selection is required'),
+  paymentMode: z.string().optional().default('CASH'),
+  notes: z.string().optional(),
 });
 
 export const planSchema = z.object({
@@ -107,6 +146,7 @@ export const seatSchema = z.object({
 
 export const assignSeatSchema = z.object({
   seatId: z.string().min(1, 'Seat ID is required'),
+  batchId: z.string().min(1, 'Batch ID is required'),
   userId: z.string().min(1, 'User ID is required'),
   startDate: z.string().min(1, 'Start date is required'),
   endDate: z.string().min(1, 'End date is required'),
@@ -146,4 +186,10 @@ export const submitPaymentSchema = z.object({
 export const reviewPaymentSchema = z.object({
   action: z.enum(['APPROVE', 'REJECT']),
   rejectionReason: z.string().optional(),
+});
+
+export const sendWhatsAppSchema = z.object({
+  userId: z.string().min(1, 'Student ID is required'),
+  templateKey: z.string().min(1, 'Template key is required'),
+  customMessage: z.string().optional(),
 });

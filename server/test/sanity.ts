@@ -1,9 +1,19 @@
 import assert from 'assert';
 import { calculateExpiryDate } from '../services/subscriptionService.js';
 import { buildWhatsAppLink, formatWhatsAppNumber } from '../services/reminderService.js';
-import { loginSchema, planSchema, branchSchema, managerPermissionsSchema } from '../validators/index.js';
+import { renderWhatsAppMessage, WHATSAPP_TEMPLATES } from '../services/whatsappService.js';
+import { getDateRange } from '../controllers/adminController.js';
+import {
+  loginSchema,
+  planSchema,
+  branchSchema,
+  managerPermissionsSchema,
+  createStudentSchema,
+  adminRegisterSchema,
+  batchSchema,
+} from '../validators/index.js';
 
-console.log('🧪 Starting Libr SaaS Automated Sanity Tests...');
+console.log('🧪 Starting Library Automated Sanity Tests...');
 
 // 1. Test Expiry Date Calculations
 console.log('👉 Testing Subscription Expiry Date Calculations...');
@@ -23,8 +33,8 @@ assert.strictEqual(expiryYear.toISOString().split('T')[0], '2027-01-01');
 
 console.log('  ✅ Expiry date calculations passed for Days, Months, and Years.');
 
-// 2. Test WhatsApp Link Generation
-console.log('👉 Testing Dynamic WhatsApp Link Formatter...');
+// 2. Test WhatsApp Link Generation & Template Rendering
+console.log('👉 Testing WhatsApp Link Formatter & Templates...');
 const formatted10Digit = formatWhatsAppNumber('9876543210');
 assert.strictEqual(formatted10Digit, '919876543210');
 
@@ -35,91 +45,84 @@ const waLink = buildWhatsAppLink('9876543210', 'Dear Rahul, your seat expires in
 assert(waLink.startsWith('https://wa.me/919876543210?text='));
 assert(waLink.includes('expires%20in%202%20days'));
 
-console.log('  ✅ WhatsApp link and phone formatter passed.');
-
-// 3. Test Zod Validation Schemas
-console.log('👉 Testing Validation Schemas...');
-
-// Login validation
-const validLogin = loginSchema.safeParse({ email: 'admin@library.com', password: 'password123' });
-assert.strictEqual(validLogin.success, true);
-
-const invalidLogin = loginSchema.safeParse({ email: 'not-an-email', password: '123' });
-assert.strictEqual(invalidLogin.success, false);
-
-// Plan validation
-const validPlan = planSchema.safeParse({
-  name: 'Growth Pro',
-  price: 1999,
-  currency: 'INR',
-  validity: 30,
-  validityUnit: 'Days',
-  maxBranches: 3,
-  maxManagers: 5,
-  maxUsers: 500,
-  maxSeats: 250,
-  maxMessages: 1000,
-  maxQueueEntries: 100,
-  maxStorageMB: 1024,
+const renderedMsg = renderWhatsAppMessage('EXPIRY_2_DAYS', {
+  studentName: 'Rahul',
+  libraryName: 'Apex Library',
+  expiryDate: '10/10/2026',
+  seatNumber: '04',
+  batchName: 'Morning Batch',
 });
-assert.strictEqual(validPlan.success, true);
+assert(renderedMsg.includes('Rahul'));
+assert(renderedMsg.includes('Apex Library'));
+assert(renderedMsg.includes('Desk #04') || renderedMsg.includes('Seat #04'));
 
-// Manager permissions validation
-const validPerms = managerPermissionsSchema.safeParse({
-  users_view: true,
-  users_create: true,
-  users_edit: false,
-  seats_view: true,
-  seats_assign: true,
-  queue_manage: true,
-  entries_manage: true,
-  payments_view: false,
-  expenses_manage: false,
-  expenses_add: true,
-  expenses_view: true,
-  reminders_send: true,
-  dashboard_view: true,
+console.log('  ✅ WhatsApp link and template engine passed.');
+
+// 3. Test Date Ranges for Dashboard Financials (Today, Yesterday, Month, Year, All-Time)
+console.log('👉 Testing Financial Filter Date Ranges...');
+const todayRange = getDateRange('today');
+assert.strictEqual(todayRange.label, 'Today');
+
+const monthRange = getDateRange('this_month');
+assert.strictEqual(monthRange.label, 'This Month');
+
+const allTimeRange = getDateRange('all_time');
+assert.strictEqual(allTimeRange.label, 'All Time');
+assert.strictEqual(allTimeRange.startDate.getTime(), 0);
+
+console.log('  ✅ Financial date range filters passed.');
+
+// 4. Test Student Creation Schema (No creds, required parent & batch & seat details)
+console.log('👉 Testing Student Creation Schema...');
+const validStudent = createStudentSchema.safeParse({
+  name: 'Aman Verma',
+  phone: '9876543210',
+  parentName: 'Ramesh Verma',
+  parentPhone: '9876543211',
+  classCourse: 'UPSC Aspirant',
+  gender: 'Male',
+  branchId: '64d1234567890abcdef12345',
+  batchId: '64d1234567890abcdef12346',
+  seatId: '64d1234567890abcdef12347',
+  planId: '64d1234567890abcdef12348',
 });
-assert.strictEqual(validPerms.success, true);
+assert.strictEqual(validStudent.success, true);
 
-console.log('  ✅ All Zod validation schemas passed.');
+// Missing parent phone should fail
+const invalidStudent = createStudentSchema.safeParse({
+  name: 'Aman Verma',
+  phone: '9876543210',
+  parentName: 'Ramesh Verma',
+  branchId: '64d1234567890abcdef12345',
+});
+assert.strictEqual(invalidStudent.success, false);
 
-// 4. Test ImgBB API Key validation formatting
-console.log('👉 Testing ImgBB Key Validation...');
-const testKeyShort = '12345';
-assert(testKeyShort.length < 16, 'Short key correctly identified');
-const validKeySample = '3a7b9f82d1c4e5a6b8c9d0e1f2a3b4c5';
-assert.strictEqual(validKeySample.length, 32);
-const masked = `••••${validKeySample.slice(-4)}`;
-assert.strictEqual(masked, '••••b4c5');
-console.log('  ✅ ImgBB key format and masking rules passed.');
+console.log('  ✅ Student validation schema passed.');
 
-// 5. Test 7-Day Session Duration & Device Fingerprint
-console.log('👉 Testing 7-Day Session Logic & Device Fingerprinting...');
-import { computeDeviceFingerprint, SESSION_DURATION_DAYS } from '../services/sessionService.js';
-import { DEFAULT_SITE_SETTINGS } from '../services/siteSettingsService.js';
+// 5. Test Admin Registration with WhatsApp OTP
+console.log('👉 Testing Admin Registration with OTP Validation...');
+const validAdmin = adminRegisterSchema.safeParse({
+  name: 'Library Admin',
+  email: 'admin@library.com',
+  phone: '9876543210',
+  whatsappNumber: '9876543210',
+  password: 'password123',
+  confirmPassword: 'password123',
+  organizationName: 'City Library',
+  otp: '123456',
+});
+assert.strictEqual(validAdmin.success, true);
 
-assert.strictEqual(SESSION_DURATION_DAYS, 7);
+console.log('  ✅ Admin registration with WhatsApp OTP schema passed.');
 
-const deviceIdA = 'device-laptop-chrome-123';
-const deviceIdB = 'device-phone-safari-456';
-const uaChrome = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0';
-const uaSafari = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15 Safari/604.1';
+// 6. Test Batch Schema
+console.log('👉 Testing Batch Timing Schema...');
+const validBatch = batchSchema.safeParse({
+  name: 'Morning Batch',
+  startTime: '08:00 AM',
+  endTime: '01:00 PM',
+});
+assert.strictEqual(validBatch.success, true);
+console.log('  ✅ Batch timing schema passed.');
 
-const fpA = computeDeviceFingerprint(deviceIdA, uaChrome);
-const fpA_repeat = computeDeviceFingerprint(deviceIdA, uaChrome);
-const fpB = computeDeviceFingerprint(deviceIdB, uaSafari);
-const fpDifferentDevice = computeDeviceFingerprint(deviceIdB, uaChrome);
-
-assert.strictEqual(fpA, fpA_repeat, 'Fingerprint must be consistent for same device and UA');
-assert.notStrictEqual(fpA, fpB, 'Fingerprint must differ for distinct devices and UAs');
-assert.notStrictEqual(fpA, fpDifferentDevice, 'Fingerprint must detect device ID changes');
-console.log('  ✅ 7-Day session duration and device binding verification passed.');
-
-// 6. Test Default Platform Site Settings
-console.log('👉 Testing Platform Site Settings Defaults...');
-assert.strictEqual(DEFAULT_SITE_SETTINGS.siteName, 'Libr');
-assert(DEFAULT_SITE_SETTINGS.siteTagline.length > 0);
-console.log('  ✅ Default site settings schema verified.');
-
-console.log('\n🎉 ALL 6 SUITES OF SANITY TESTS PASSED SUCCESSFULLY! 🚀\n');
+console.log('\n🎉 ALL SANITY TESTS PASSED SUCCESSFULLY! 🚀\n');

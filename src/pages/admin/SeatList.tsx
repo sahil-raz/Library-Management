@@ -1,48 +1,49 @@
 import React, { useEffect, useState } from 'react';
-import { Armchair, Plus, User, Calendar, Trash2, CheckCircle2, UserMinus, Search, X } from 'lucide-react';
+import { Armchair, Plus, User, Clock, Trash2, Search, X, Calendar, Layers, ChevronRight } from 'lucide-react';
 import { api } from '../../api/client.js';
 import { Header } from '../../components/common/Header.js';
 import { Input } from '../../components/common/Input.js';
-import { BottomSheet } from '../../components/reactbits/BottomSheet.js';
-import { ShimmerButton } from '../../components/reactbits/ShimmerButton.js';
-import { PulseBadge } from '../../components/reactbits/PulseBadge.js';
 import { useToast } from '../../context/ToastContext.js';
+import { BatchOccupancyModal } from '../../components/admin/BatchOccupancyModal.js';
+import { BatchManagerModal } from '../../components/admin/BatchManagerModal.js';
+import { StudentDetailModal } from '../../components/admin/StudentDetailModal.js';
+import { IDCardModal } from '../../components/common/IDCardModal.js';
+import { RenewPlanModal } from '../../components/admin/RenewPlanModal.js';
+import { SendWhatsAppModal } from '../../components/admin/SendWhatsAppModal.js';
 
 export const SeatList: React.FC = () => {
   const { showToast } = useToast();
   const [seats, setSeats] = useState<any[]>([]);
   const [branches, setBranches] = useState<any[]>([]);
-  const [users, setUsers] = useState<any[]>([]);
+  const [batches, setBatches] = useState<any[]>([]);
   const [selectedBranchId, setSelectedBranchId] = useState('');
+  const [selectedBatchFilter, setSelectedBatchFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'AVAILABLE' | 'ASSIGNED'>('ALL');
 
   // Create Seat Modal
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [seatNumber, setSeatNumber] = useState('');
   const [targetBranchId, setTargetBranchId] = useState('');
 
-  // Assign Seat Modal
-  const [assignSeatTarget, setAssignSeatTarget] = useState<any>(null);
-  const [assignUserId, setAssignUserId] = useState('');
-  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
-  const [endDate, setEndDate] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 30);
-    return d.toISOString().split('T')[0];
-  });
-  const [notes, setNotes] = useState('');
-  const [isAssigning, setIsAssigning] = useState(false);
+  // Timing Batches Management Modal
+  const [isBatchManagerOpen, setIsBatchManagerOpen] = useState(false);
+
+  // Linking Modals
+  const [selectedSeatId, setSelectedSeatId] = useState<string | null>(null);
+  const [selectedStudent, setSelectedStudent] = useState<any>(null);
+  const [idCardData, setIdCardData] = useState<any>(null);
+  const [studentToRenew, setStudentToRenew] = useState<any>(null);
+  const [studentToSendWhatsApp, setStudentToSendWhatsApp] = useState<any>(null);
 
   const fetchData = async () => {
     try {
       setLoading(true);
       const params = selectedBranchId ? `?branchId=${selectedBranchId}` : '';
-      const [sRes, bRes, uRes] = await Promise.all([
+      const [sRes, bRes, batchRes] = await Promise.all([
         api.get<{ success: boolean; seats: any[] }>(`/admin/seats${params}`),
         api.get<{ success: boolean; branches: any[] }>('/admin/branches'),
-        api.get<{ success: boolean; users: any[] }>('/admin/users'),
+        api.get<{ success: boolean; batches: any[] }>('/admin/batches'),
       ]);
 
       if (sRes.success) setSeats(sRes.seats);
@@ -52,7 +53,7 @@ export const SeatList: React.FC = () => {
           setTargetBranchId(bRes.branches[0]._id);
         }
       }
-      if (uRes.success) setUsers(uRes.users);
+      if (batchRes.success) setBatches(batchRes.batches);
     } catch (err: any) {
       showToast(err.message || 'Failed to load seats', 'error');
     } finally {
@@ -85,44 +86,6 @@ export const SeatList: React.FC = () => {
     }
   };
 
-  const handleAssignSeat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!assignSeatTarget || !assignUserId) {
-      showToast('Please select a student/patron', 'error');
-      return;
-    }
-
-    try {
-      setIsAssigning(true);
-      await api.post('/admin/seats/assign', {
-        seatId: assignSeatTarget._id,
-        userId: assignUserId,
-        startDate,
-        endDate,
-        notes,
-      });
-      showToast(`Seat ${assignSeatTarget.seatNumber} assigned!`, 'success');
-      setAssignSeatTarget(null);
-      setAssignUserId('');
-      fetchData();
-    } catch (err: any) {
-      showToast(err.message || 'Assignment failed', 'error');
-    } finally {
-      setIsAssigning(false);
-    }
-  };
-
-  const handleUnassignSeat = async (seatId: string) => {
-    if (!confirm('Release this seat? The student will no longer have this seat reserved.')) return;
-    try {
-      await api.post(`/admin/seats/${seatId}/unassign`);
-      showToast('Seat released', 'info');
-      fetchData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to release seat', 'error');
-    }
-  };
-
   const handleDeleteSeat = async (seatId: string) => {
     if (!confirm('Delete this seat?')) return;
     try {
@@ -130,90 +93,70 @@ export const SeatList: React.FC = () => {
       showToast('Seat deleted', 'info');
       fetchData();
     } catch (err: any) {
-      showToast(err.message || 'Failed to delete seat', 'error');
+      showToast(err.message || 'Failed to delete seat (Active assignments exist)', 'error');
+    }
+  };
+
+  const handleOpenIdCard = async (student: any) => {
+    try {
+      const res = await api.get<{ success: boolean; idCard: any }>(`/admin/users/${student._id}/id-card`);
+      if (res.success) setIdCardData(res.idCard);
+    } catch (err) {
+      console.error(err);
     }
   };
 
   const filteredSeats = seats.filter((s) => {
-    if (statusFilter !== 'ALL' && s.status !== statusFilter) return false;
+    if (selectedBatchFilter) {
+      const hasBatch = s.activeAssignments?.some(
+        (a: any) => (a.batchId?._id || a.batchId) === selectedBatchFilter
+      );
+      if (!hasBatch) return false;
+    }
     if (!search.trim()) return true;
     const q = search.trim().toLowerCase();
     const matchNumber = s.seatNumber?.toLowerCase().includes(q);
-    const student = s.assignedUserId;
-    const matchStudentName = student?.name?.toLowerCase().includes(q);
-    const matchStudentEmail = student?.email?.toLowerCase().includes(q);
-    const matchStudentPhone = student?.phone?.toLowerCase().includes(q);
-    return matchNumber || matchStudentName || matchStudentEmail || matchStudentPhone;
+    const matchStudent = s.activeAssignments?.some((a: any) =>
+      a.userId?.name?.toLowerCase().includes(q) || a.userId?.phone?.includes(q)
+    );
+    return matchNumber || matchStudent;
   });
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-50 pb-8">
+    <div className="flex-1 flex flex-col bg-slate-50 pb-12 min-h-screen">
       <Header
         title="Seat Management"
-        subtitle="Desks, Reservations & Occupancy"
+        subtitle="Batch-Wise Timings & Desk Allocation"
         showBack
         rightAction={
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="p-2 rounded-full bg-ios-blue text-white shadow-sm active:scale-95 transition-all"
-            title="Add Seat"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsBatchManagerOpen(true)}
+              className="px-3 py-1.5 rounded-full bg-white border border-slate-200 text-slate-800 text-xs font-bold shadow-sm active:scale-95 transition-all flex items-center gap-1.5"
+              title="Manage Session Batches"
+            >
+              <Clock className="w-3.5 h-3.5 text-amber-500" />
+              <span>Session Batches</span>
+            </button>
+            <button
+              onClick={() => setIsCreateOpen(true)}
+              className="p-2 rounded-full bg-ios-blue text-white shadow-sm active:scale-95 transition-all"
+              title="Add Desk / Seat"
+            >
+              <Plus className="w-5 h-5" />
+            </button>
+          </div>
         }
       />
 
-      <div className="p-4 flex flex-col gap-3">
-        {/* Search Bar */}
-        <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search seat number, student name or email..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-8 py-2 text-xs rounded-2xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-ios-blue/30"
-          />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-
-        {/* Status Filter Pills & Branch Selector */}
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-            {(['ALL', 'AVAILABLE', 'ASSIGNED'] as const).map((st) => (
-              <button
-                key={st}
-                onClick={() => setStatusFilter(st)}
-                className={`px-3 py-1 rounded-full text-[11px] font-bold transition-all ${
-                  statusFilter === st
-                    ? 'bg-slate-900 text-white shadow-sm'
-                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-                }`}
-              >
-                {st === 'ALL' ? 'All Seats' : st === 'AVAILABLE' ? 'Available' : 'Occupied'}
-                <span className="ml-1 text-[10px] opacity-70">
-                  (
-                  {st === 'ALL'
-                    ? seats.length
-                    : seats.filter((s) => s.status === st).length}
-                  )
-                </span>
-              </button>
-            ))}
-          </div>
-
+      <div className="p-4 flex flex-col gap-3.5">
+        {/* Branch Filter & Batch Filter Pills */}
+        <div className="flex flex-wrap items-center gap-2">
           {branches.length > 1 && (
             <select
               value={selectedBranchId}
               onChange={(e) => setSelectedBranchId(e.target.value)}
-              className="w-full px-3.5 py-1.5 text-xs rounded-2xl border border-slate-200 bg-white font-semibold text-slate-700 focus:outline-none"
+              className="px-3 py-2 text-xs rounded-2xl border border-slate-200 bg-white font-medium text-slate-700 outline-none"
             >
               <option value="">All Branches</option>
               {branches.map((b) => (
@@ -223,109 +166,134 @@ export const SeatList: React.FC = () => {
               ))}
             </select>
           )}
+
+          {batches.length > 0 && (
+            <select
+              value={selectedBatchFilter}
+              onChange={(e) => setSelectedBatchFilter(e.target.value)}
+              className="px-3 py-2 text-xs rounded-2xl border border-slate-200 bg-white font-medium text-slate-700 outline-none"
+            >
+              <option value="">All Session Timings</option>
+              {batches.map((b) => (
+                <option key={b._id} value={b._id}>
+                  {b.name} ({b.startTime} - {b.endTime})
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Search Box */}
+          <div className="relative flex-1 min-w-[180px]">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search desk number or student..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-8 py-2 text-xs rounded-2xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-ios-blue/30"
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Visual Seat Grid */}
-        {loading ? (
-          <div className="text-center text-xs text-slate-400 py-8">Loading seats...</div>
-        ) : seats.length === 0 ? (
-          <div className="p-8 text-center bg-white rounded-3xl border border-slate-200 mt-4">
-            <Armchair className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-            <h3 className="text-sm font-bold text-slate-700">No Seats Configured</h3>
-            <p className="text-xs text-slate-400 mt-1 mb-4">
-              Create seats up to your subscription plan limit.
-            </p>
-            <ShimmerButton onClick={() => setIsCreateOpen(true)} size="md">
-              Add First Seat
-            </ShimmerButton>
+        {/* Informational Guidance */}
+        <div className="p-3 rounded-2xl bg-blue-50/70 border border-blue-200 text-blue-900 text-xs flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-ios-blue flex-shrink-0" />
+            <span>
+              Click any seat to view its <strong>occupants across all session timing batches</strong>.
+            </span>
           </div>
+        </div>
+
+        {/* Seat Grid */}
+        {loading ? (
+          <div className="text-center text-xs text-slate-400 py-12">Loading desks and batches...</div>
         ) : filteredSeats.length === 0 ? (
-          <div className="p-8 text-center bg-white rounded-3xl border border-slate-200 mt-2">
-            <Search className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-            <h3 className="text-sm font-bold text-slate-700">No matching seats found</h3>
-            <p className="text-xs text-slate-400 mt-1 mb-3">
-              No seat matches "{search}". Try searching another seat number or student.
-            </p>
+          <div className="p-10 text-center bg-white rounded-3xl border border-slate-200 mt-2">
+            <Armchair className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="text-sm font-bold text-slate-700">No Desks Configured</h3>
+            <p className="text-xs text-slate-400 mt-1 mb-3">Add desks to start allocating students in session batches.</p>
             <button
-              onClick={() => {
-                setSearch('');
-                setStatusFilter('ALL');
-              }}
-              className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-bold text-slate-700 transition-colors"
+              onClick={() => setIsCreateOpen(true)}
+              className="px-4 py-2 bg-ios-blue text-white rounded-xl text-xs font-bold"
             >
-              Clear Filters
+              Add Desk #01
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
             {filteredSeats.map((seat) => {
-              const isAssigned = seat.status === 'ASSIGNED';
+              const activeCount = seat.activeAssignments?.length || 0;
+              const hasAssignments = activeCount > 0;
+
               return (
                 <div
                   key={seat._id}
-                  className={`p-3.5 rounded-3xl border shadow-sm flex flex-col justify-between transition-all ${
-                    isAssigned
-                      ? 'bg-blue-50/70 border-blue-200/90'
-                      : 'bg-white border-slate-200'
-                  }`}
+                  onClick={() => setSelectedSeatId(seat._id)}
+                  className="p-3.5 rounded-3xl bg-white border border-slate-200 hover:border-ios-blue/60 shadow-ios hover:shadow-md transition-all cursor-pointer relative group flex flex-col justify-between text-left"
                 >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <span className="text-xs text-slate-400 font-semibold block">
-                        {seat.branchId?.name}
-                      </span>
-                      <h4 className="text-lg font-black text-slate-900 tracking-tight">
+                  <div>
+                    {/* Seat Header */}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="w-8 h-8 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center font-black text-xs">
                         {seat.seatNumber}
-                      </h4>
-                    </div>
-                    <PulseBadge status={seat.status} size="sm" />
-                  </div>
-
-                  <div className="my-2 text-xs">
-                    {isAssigned && seat.assignedUserId ? (
-                      <div className="space-y-0.5">
-                        <span className="font-bold text-slate-800 truncate block">
-                          {seat.assignedUserId.name}
-                        </span>
-                        <span className="text-[10px] text-slate-500 block truncate">
-                          {seat.assignedUserId.phone}
-                        </span>
-                        {seat.assignedUntil && (
-                          <span className="text-[10px] text-slate-400 block">
-                            Until {new Date(seat.assignedUntil).toLocaleDateString()}
-                          </span>
-                        )}
                       </div>
-                    ) : (
-                      <span className="text-xs text-slate-400 italic">Available to allocate</span>
-                    )}
+
+                      <span
+                        className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full ${
+                          hasAssignments
+                            ? 'bg-purple-100 text-purple-800'
+                            : 'bg-emerald-100 text-emerald-800'
+                        }`}
+                      >
+                        {hasAssignments ? `${activeCount} BATCH` : 'VACANT'}
+                      </span>
+                    </div>
+
+                    {/* Desk Details */}
+                    <span className="text-sm font-bold text-slate-900 block">
+                      Desk {seat.seatNumber}
+                    </span>
+                    <span className="text-[10px] text-slate-400 block line-clamp-1">
+                      {seat.branchId?.name}
+                    </span>
+
+                    {/* Occupants Snapshot across batches */}
+                    <div className="mt-2.5 pt-2 border-t border-slate-100 space-y-1">
+                      {hasAssignments ? (
+                        seat.activeAssignments.map((assign: any, i: number) => (
+                          <div
+                            key={i}
+                            className="text-[10px] text-slate-600 flex items-center justify-between truncate"
+                          >
+                            <span className="font-semibold text-slate-700 truncate max-w-[90px]">
+                              {assign.batchId?.name || 'Shift'}
+                            </span>
+                            <span className="text-ios-blue font-bold truncate max-w-[80px]">
+                              {assign.userId?.name?.split(' ')[0]}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <span className="text-[10px] text-emerald-600 font-semibold block">
+                          Free in all shifts
+                        </span>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between gap-1">
-                    {isAssigned ? (
-                      <button
-                        onClick={() => handleUnassignSeat(seat._id)}
-                        className="flex-1 py-1 px-2 rounded-xl bg-slate-200/80 hover:bg-slate-300 text-slate-700 text-[11px] font-bold active:scale-95 transition-all text-center"
-                      >
-                        Release
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setAssignSeatTarget(seat);
-                          if (users.length > 0) setAssignUserId(users[0]._id);
-                        }}
-                        className="flex-1 py-1 px-2 rounded-xl bg-ios-blue text-white text-[11px] font-bold active:scale-95 shadow-sm transition-all text-center"
-                      >
-                        Assign
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleDeleteSeat(seat._id)}
-                      className="p-1 rounded-xl text-slate-400 hover:text-rose-500"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                  {/* Card Bottom CTA */}
+                  <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-400 group-hover:text-ios-blue font-semibold">
+                    <span>View Schedule</span>
+                    <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                   </div>
                 </div>
               );
@@ -334,96 +302,107 @@ export const SeatList: React.FC = () => {
         )}
       </div>
 
-      {/* Create Seat BottomSheet */}
-      <BottomSheet
-        isOpen={isCreateOpen}
-        onClose={() => setIsCreateOpen(false)}
-        title="Add Study Desk / Seat"
-      >
-        <form onSubmit={handleCreateSeat} className="flex flex-col gap-3.5">
-          <Input
-            label="Seat / Desk Number"
-            placeholder="e.g. A01, B12, CABIN-4"
-            value={seatNumber}
-            onChange={(e) => setSeatNumber(e.target.value)}
-            required
-          />
+      {/* Create Desk Modal */}
+      {isCreateOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-bold text-slate-900">Add New Desk / Seat</h3>
+              <button
+                onClick={() => setIsCreateOpen(false)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
-          <div className="flex flex-col gap-1 text-left">
-            <label className="text-xs font-semibold text-slate-700">Branch</label>
-            <select
-              value={targetBranchId}
-              onChange={(e) => setTargetBranchId(e.target.value)}
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-ios-blue/30"
-              required
-            >
-              {branches.map((b) => (
-                <option key={b._id} value={b._id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+            <form onSubmit={handleCreateSeat} className="space-y-3.5">
+              <div>
+                <label className="block text-slate-600 font-bold text-xs mb-1">Branch</label>
+                <select
+                  value={targetBranchId}
+                  onChange={(e) => setTargetBranchId(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white font-medium text-slate-800 text-xs focus:ring-2 focus:ring-ios-blue/30 outline-none"
+                  required
+                >
+                  {branches.map((b) => (
+                    <option key={b._id} value={b._id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <Input
+                label="Seat / Desk Number"
+                placeholder="e.g. 01, A-12, or Desk-4"
+                value={seatNumber}
+                onChange={(e) => setSeatNumber(e.target.value)}
+                required
+              />
+
+              <div className="pt-2 flex items-center gap-2">
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-ios-blue hover:bg-blue-600 text-white font-bold text-xs shadow-md active:scale-95 transition-all"
+                >
+                  Create Desk
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateOpen(false)}
+                  className="py-2.5 px-4 rounded-xl bg-slate-200 text-slate-800 font-bold text-xs"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
           </div>
+        </div>
+      )}
 
-          <ShimmerButton type="submit" size="lg" className="w-full mt-2">
-            Create Seat
-          </ShimmerButton>
-        </form>
-      </BottomSheet>
+      {/* Linked Modals */}
+      <BatchManagerModal
+        isOpen={isBatchManagerOpen}
+        onClose={() => setIsBatchManagerOpen(false)}
+        onBatchesUpdated={fetchData}
+      />
 
-      {/* Assign Seat BottomSheet */}
-      <BottomSheet
-        isOpen={!!assignSeatTarget}
-        onClose={() => setAssignSeatTarget(null)}
-        title={`Assign Seat: ${assignSeatTarget?.seatNumber}`}
-      >
-        <form onSubmit={handleAssignSeat} className="flex flex-col gap-3.5">
-          <div className="flex flex-col gap-1 text-left">
-            <label className="text-xs font-semibold text-slate-700">Select Student / Member</label>
-            <select
-              value={assignUserId}
-              onChange={(e) => setAssignUserId(e.target.value)}
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-ios-blue/30"
-              required
-            >
-              {users.length === 0 && <option value="">No patrons found</option>}
-              {users.map((u) => (
-                <option key={u._id} value={u._id}>
-                  {u.name} ({u.phone})
-                </option>
-              ))}
-            </select>
-          </div>
+      <BatchOccupancyModal
+        isOpen={!!selectedSeatId}
+        seatId={selectedSeatId}
+        onClose={() => setSelectedSeatId(null)}
+        onSelectStudent={(student) => setSelectedStudent(student)}
+      />
 
-          <div className="grid grid-cols-2 gap-2">
-            <Input
-              label="Start Date"
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              required
-            />
-            <Input
-              label="End Date (Auto-Expiry)"
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              required
-            />
-          </div>
+      <StudentDetailModal
+        isOpen={!!selectedStudent}
+        student={selectedStudent}
+        onClose={() => setSelectedStudent(null)}
+        onGenerateIdCard={(student) => handleOpenIdCard(student)}
+        onRenewPlan={(student) => setStudentToRenew(student)}
+        onSendWhatsApp={(student) => setStudentToSendWhatsApp(student)}
+      />
 
-          <Input
-            label="Internal Notes (Optional)"
-            placeholder="e.g. Morning shift slot"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
+      <IDCardModal
+        isOpen={!!idCardData}
+        idCardData={idCardData}
+        onClose={() => setIdCardData(null)}
+      />
 
-          <ShimmerButton type="submit" size="lg" isLoading={isAssigning} className="w-full mt-2">
-            Confirm Seat Assignment
-          </ShimmerButton>
-        </form>
-      </BottomSheet>
+      <RenewPlanModal
+        isOpen={!!studentToRenew}
+        student={studentToRenew}
+        onClose={() => setStudentToRenew(null)}
+        onSuccess={fetchData}
+      />
+
+      <SendWhatsAppModal
+        isOpen={!!studentToSendWhatsApp}
+        student={studentToSendWhatsApp}
+        onClose={() => setStudentToSendWhatsApp(null)}
+        onSuccess={fetchData}
+      />
     </div>
   );
 };

@@ -9,7 +9,7 @@ export interface SiteSettings {
 }
 
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
-  siteName: 'Libr',
+  siteName: 'Library',
   siteTagline: 'Multi-Library & Study Center Management',
   description: 'Production-Ready Mobile-First Multi-Library Management SaaS & Study Space Platform',
   supportEmail: 'support@libr.com',

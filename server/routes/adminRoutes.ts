@@ -3,6 +3,10 @@ import {
   getDashboard,
   getAvailableSaaSPlans,
   purchaseSaaSPlan,
+  getBatches,
+  createBatch,
+  updateBatch,
+  deleteBatch,
   getBranches,
   createBranch,
   updateBranch,
@@ -16,13 +20,16 @@ import {
   updateUserPlan,
   deleteUserPlan,
   getSeats,
+  getSeatBatchDetails,
   createSeat,
-  assignSeat,
-  unassignSeat,
   deleteSeat,
   getUsers,
   createUser,
+  renewUserPlan,
+  getStudentIdCard,
   updateUserEntryStatus,
+  getWhatsAppTemplates,
+  sendManualWhatsApp,
   getQueue,
   addToQueue,
   promoteQueueUser,
@@ -51,6 +58,12 @@ router.get('/dashboard', getDashboard);
 router.get('/saas-plans', getAvailableSaaSPlans);
 router.post('/saas-plans/purchase', purchaseSaaSPlan);
 
+// Batches / Session Timings
+router.get('/batches', getBatches);
+router.post('/batches', createBatch);
+router.patch('/batches/:batchId', updateBatch);
+router.delete('/batches/:batchId', deleteBatch);
+
 // Branches
 router.get('/branches', getBranches);
 router.post('/branches', enforcePlanLimit('branches'), createBranch);
@@ -69,17 +82,22 @@ router.post('/plans', createUserPlan);
 router.patch('/plans/:planId', updateUserPlan);
 router.delete('/plans/:planId', deleteUserPlan);
 
-// Seats
+// Seats (Timing & Batch Based)
 router.get('/seats', getSeats);
+router.get('/seats/:seatId/details', getSeatBatchDetails);
 router.post('/seats', enforcePlanLimit('seats'), createSeat);
-router.post('/seats/assign', assignSeat);
-router.post('/seats/:seatId/unassign', unassignSeat);
 router.delete('/seats/:seatId', deleteSeat);
 
-// Users / Patrons
+// Students / Users
 router.get('/users', getUsers);
 router.post('/users', enforcePlanLimit('users'), createUser);
+router.post('/users/:userId/renew-plan', renewUserPlan);
+router.get('/users/:userId/id-card', getStudentIdCard);
 router.patch('/users/:userId/entry-status', updateUserEntryStatus);
+
+// WhatsApp Notifications & Templates
+router.get('/whatsapp/templates', getWhatsAppTemplates);
+router.post('/whatsapp/send', sendManualWhatsApp);
 
 // Queue Management
 router.get('/queue', getQueue);
@@ -99,7 +117,7 @@ router.post('/payments/:paymentId/review', reviewPayment);
 router.get('/payment-config', getPaymentConfig);
 router.put('/payment-config', updatePaymentConfig);
 
-// WhatsApp Reminders
+// WhatsApp Reminders & Logs
 router.get('/reminders', getWhatsAppReminders);
 router.post('/reminders/:reminderId/open', markReminderOpened);
 

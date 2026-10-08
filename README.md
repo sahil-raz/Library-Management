@@ -1,4 +1,4 @@
-# 📱 Libr - Production-Ready Multi-Library Management SaaS
+# 📱 Production-Ready Multi-Library Management SaaS
 
 A complete, production-ready, mobile-first **Multi-Library & Study Center Management SaaS** platform engineered to behave and feel like a premium native iOS application (designed around a 430px mobile viewport, safe-area insets, fluid spring micro-interactions, ReactBits components, bottom navigation, bottom sheets, and PWA/Android APK readiness).
 

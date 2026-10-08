@@ -4,6 +4,7 @@ export interface ISeatAssignment extends Document {
   adminId: Types.ObjectId;
   branchId: Types.ObjectId;
   seatId: Types.ObjectId;
+  batchId?: Types.ObjectId;
   userId: Types.ObjectId;
   startDate: Date;
   endDate: Date;
@@ -20,6 +21,7 @@ const SeatAssignmentSchema = new Schema<ISeatAssignment>(
     adminId: { type: Schema.Types.ObjectId, ref: 'Admin', required: true, index: true },
     branchId: { type: Schema.Types.ObjectId, ref: 'Branch', required: true, index: true },
     seatId: { type: Schema.Types.ObjectId, ref: 'Seat', required: true, index: true },
+    batchId: { type: Schema.Types.ObjectId, ref: 'Batch', index: true },
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     startDate: { type: Date, required: true },
     endDate: { type: Date, required: true },
@@ -35,5 +37,9 @@ const SeatAssignmentSchema = new Schema<ISeatAssignment>(
   },
   { timestamps: true }
 );
+
+// Ensures quick lookup of active assignments by seat and batch
+SeatAssignmentSchema.index({ seatId: 1, batchId: 1, status: 1 });
+SeatAssignmentSchema.index({ adminId: 1, userId: 1, status: 1 });
 
 export const SeatAssignment = mongoose.model<ISeatAssignment>('SeatAssignment', SeatAssignmentSchema);

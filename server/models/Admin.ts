@@ -9,6 +9,7 @@ export interface IAdmin extends Document {
   organizationName: string;
   status: 'ACTIVE' | 'SUSPENDED' | 'INACTIVE';
   currentSubscription?: Types.ObjectId;
+  whatsappAlertsUsed: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -17,12 +18,13 @@ const AdminSchema = new Schema<IAdmin>(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
-    phone: { type: String, required: true, trim: true },
+    phone: { type: String, required: true, unique: true, trim: true, index: true },
     whatsappNumber: { type: String, required: true, trim: true },
     password: { type: String, required: true },
     organizationName: { type: String, required: true, trim: true },
     status: { type: String, enum: ['ACTIVE', 'SUSPENDED', 'INACTIVE'], default: 'ACTIVE', index: true },
     currentSubscription: { type: Schema.Types.ObjectId, ref: 'Subscription' },
+    whatsappAlertsUsed: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

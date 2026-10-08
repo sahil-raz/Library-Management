@@ -38,4 +38,9 @@ export const ENV = {
   SUPERADMIN_EMAIL: (process.env.SUPERADMIN_EMAIL || 'owner@example.com').toLowerCase().trim(),
   SUPERADMIN_PASSWORD: process.env.SUPERADMIN_PASSWORD || 'ChangeThisImmediately',
   SUPERADMIN_NAME: process.env.SUPERADMIN_NAME || 'Platform Owner',
+  // Official AIPlexy WhatsApp API
+  AIPLEXY_API_URL: process.env.AIPLEXY_API_URL || 'https://api.aiplexy.com/v1/messages',
+  AIPLEXY_API_KEY: process.env.AIPLEXY_API_KEY || '',
+  AIPLEXY_INSTANCE_ID: process.env.AIPLEXY_INSTANCE_ID || '',
+  AIPLEXY_SENDER_NUMBER: process.env.AIPLEXY_SENDER_NUMBER || '',
 };

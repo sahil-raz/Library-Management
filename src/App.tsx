@@ -116,11 +116,11 @@ export function App() {
 
               {/* Public Auth */}
               <Route path="/login" element={<Login />} />
-              <Route path="/login/user" element={<Login />} />
-              <Route path="/user/login" element={<Login />} />
-              <Route path="/register" element={<UserRegister />} />
+              <Route path="/login/user" element={<Navigate to="/login" replace />} />
+              <Route path="/user/login" element={<Navigate to="/login" replace />} />
+              <Route path="/register" element={<Navigate to="/register/admin" replace />} />
               <Route path="/register/admin" element={<AdminRegister />} />
-              <Route path="/register/user" element={<UserRegister />} />
+              <Route path="/register/user" element={<Navigate to="/register/admin" replace />} />
 
               {/* Super Admin Protected Routes */}
               <Route
@@ -222,14 +222,6 @@ export function App() {
                 }
               />
               <Route
-                path="/admin/plans"
-                element={
-                  <ProtectedRoute allowedRoles={['ADMIN']}>
-                    <SaaSPurchase />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
                 path="/admin/saas-purchase"
                 element={
                   <ProtectedRoute allowedRoles={['ADMIN']}>
@@ -271,6 +263,14 @@ export function App() {
               />
               <Route
                 path="/admin/plans"
+                element={
+                  <ProtectedRoute allowedRoles={['ADMIN']}>
+                    <UserPlanCreator />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/admin/user-plans"
                 element={
                   <ProtectedRoute allowedRoles={['ADMIN']}>
                     <UserPlanCreator />

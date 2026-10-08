@@ -9,6 +9,7 @@ import { ManagerPermission } from '../models/ManagerPermission.js';
 import { User } from '../models/User.js';
 import { Seat } from '../models/Seat.js';
 import { SeatAssignment } from '../models/SeatAssignment.js';
+import { Batch } from '../models/Batch.js';
 import { Plan } from '../models/Plan.js';
 import { UserPlan } from '../models/UserPlan.js';
 import { Subscription } from '../models/Subscription.js';
@@ -23,9 +24,10 @@ import {
   managerSchema,
   managerPermissionsSchema,
   seatSchema,
-  assignSeatSchema,
   userPlanSchema,
-  userRegisterSchema,
+  createStudentSchema,
+  renewPlanSchema,
+  batchSchema,
   expenseSchema,
   queueEntrySchema,
   paymentConfigSchema,
@@ -34,7 +36,8 @@ import {
 } from '../validators/index.js';
 import { getAdminUsageStats, checkPlanLimit } from '../services/planLimitService.js';
 import { calculateExpiryDate, getActiveAdminSubscription } from '../services/subscriptionService.js';
-import { generateOrGetExpiryReminders, buildWhatsAppLink } from '../services/reminderService.js';
+import { generateOrGetExpiryReminders } from '../services/reminderService.js';
+import { sendWhatsAppAlert, WHATSAPP_TEMPLATES, buildWhatsAppLink } from '../services/whatsappService.js';
 import { createNotification } from '../services/notificationService.js';
 import { logAudit } from '../services/auditService.js';
 
@@ -44,10 +47,69 @@ function getAdminId(req: AuthenticatedRequest): Types.ObjectId {
   return new Types.ObjectId(idStr);
 }
 
-// 1. Dashboard
+export function getDateRange(filter: string): { startDate: Date; endDate: Date; label: string } {
+  const now = new Date();
+  const endDate = new Date();
+  let startDate = new Date();
+  let label = 'This Month';
+
+  switch (filter) {
+    case 'today': {
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+      label = 'Today';
+      break;
+    }
+    case 'yesterday': {
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0);
+      endDate.setTime(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999).getTime());
+      label = 'Yesterday';
+      break;
+    }
+    case 'this_week': {
+      const day = now.getDay();
+      const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+      startDate = new Date(now.getFullYear(), now.getMonth(), diff, 0, 0, 0, 0);
+      label = 'This Week';
+      break;
+    }
+    case 'this_month': {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      label = 'This Month';
+      break;
+    }
+    case 'last_6_months': {
+      startDate = new Date(now.getFullYear(), now.getMonth() - 5, 1, 0, 0, 0, 0);
+      label = 'Last 6 Months';
+      break;
+    }
+    case 'this_year': {
+      startDate = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+      label = 'This Year';
+      break;
+    }
+    case 'all_time': {
+      startDate = new Date(0);
+      label = 'All Time';
+      break;
+    }
+    default: {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      label = 'This Month';
+      break;
+    }
+  }
+
+  return { startDate, endDate, label };
+}
+
+// 1. Dashboard Financials & Quotas
 export async function getDashboard(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
+  const filter = (req.query.filter as string) || 'this_month';
+  const { startDate, endDate, label } = getDateRange(filter);
+
   const usageStats = await getAdminUsageStats(adminId);
+  const admin = await Admin.findById(adminId);
 
   const [
     branchesCount,
@@ -57,27 +119,45 @@ export async function getDashboard(req: AuthenticatedRequest, res: Response): Pr
     totalUsersCount,
     userPlansCount,
     pendingPaymentsCount,
-    todayExpensesAgg,
+    incomeAgg,
+    expenseAgg,
   ] = await Promise.all([
     Branch.countDocuments({ adminId, status: 'ACTIVE' }),
-    Seat.countDocuments({ adminId, status: 'ASSIGNED' }),
+    SeatAssignment.countDocuments({ adminId, status: 'ACTIVE' }),
     Seat.countDocuments({ adminId }),
     User.countDocuments({ adminId, entryStatus: 'ACTIVE' }),
     User.countDocuments({ adminId }),
     UserPlan.countDocuments({ adminId }),
     Payment.countDocuments({ adminId, type: 'USER_PLAN', status: 'PENDING' }),
+    Payment.aggregate([
+      {
+        $match: {
+          adminId,
+          type: 'USER_PLAN',
+          status: 'APPROVED',
+          createdAt: { $gte: startDate, $lte: endDate },
+        },
+      },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
     Expense.aggregate([
       {
         $match: {
           adminId,
-          date: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+          date: { $gte: startDate, $lte: endDate },
         },
       },
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]),
   ]);
 
-  const todayExpense = todayExpensesAgg.length > 0 ? todayExpensesAgg[0].total : 0;
+  const totalIncome = incomeAgg.length > 0 ? incomeAgg[0].total : 0;
+  const totalExpenses = expenseAgg.length > 0 ? expenseAgg[0].total : 0;
+  const netRevenue = totalIncome - totalExpenses;
+
+  // WhatsApp Alert Limit & Quota calculation
+  const totalAlertsSent = await ReminderLog.countDocuments({ adminId });
+  const maxAlertsAllowed = usageStats.messages?.max || 500;
 
   res.json({
     success: true,
@@ -90,7 +170,20 @@ export async function getDashboard(req: AuthenticatedRequest, res: Response): Pr
       totalUsersCount,
       userPlansCount,
       pendingPaymentsCount,
-      todayExpense,
+      financials: {
+        filter,
+        label,
+        totalIncome,
+        totalExpenses,
+        netRevenue,
+        startDate,
+        endDate,
+      },
+      whatsappAlerts: {
+        used: totalAlertsSent,
+        limit: maxAlertsAllowed,
+        remaining: Math.max(0, maxAlertsAllowed - totalAlertsSent),
+      },
     },
   });
 }
@@ -98,10 +191,11 @@ export async function getDashboard(req: AuthenticatedRequest, res: Response): Pr
 // 2. SaaS Plans (Admin buying from Super Admin)
 export async function getAvailableSaaSPlans(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
-  const [plans, superAdminConfig, activeSub] = await Promise.all([
+  const [plans, superAdminConfig, activeSub, pendingPayment] = await Promise.all([
     Plan.find({ isActive: true }).sort({ price: 1 }),
     PaymentConfig.findOne({ scope: 'SUPERADMIN' }),
     getActiveAdminSubscription(adminId),
+    Payment.findOne({ adminId, type: 'SAAS_PLAN', status: 'PENDING' }).sort({ createdAt: -1 }),
   ]);
 
   let currentPlanId: string | null = null;
@@ -123,6 +217,7 @@ export async function getAvailableSaaSPlans(req: AuthenticatedRequest, res: Resp
     plans,
     currentPlanId,
     currentSubscription,
+    pendingPayment,
     paymentConfig: superAdminConfig,
   });
 }
@@ -130,6 +225,23 @@ export async function getAvailableSaaSPlans(req: AuthenticatedRequest, res: Resp
 export async function purchaseSaaSPlan(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const { planId, utr, screenshot } = submitPaymentSchema.parse(req.body);
+
+  // 1. Block new payment if previous payment is still PENDING
+  const existingPending = await Payment.findOne({
+    adminId,
+    type: 'SAAS_PLAN',
+    status: 'PENDING',
+  });
+
+  if (existingPending) {
+    res.status(400).json({
+      success: false,
+      code: 'PENDING_PAYMENT_EXISTS',
+      message: 'You already have a payment request under verification. You cannot submit a new payment until the previous request is accepted or denied by Super Admin.',
+      pendingPayment: existingPending,
+    });
+    return;
+  }
 
   const plan = await Plan.findById(planId);
   if (!plan) {
@@ -180,17 +292,76 @@ export async function purchaseSaaSPlan(req: AuthenticatedRequest, res: Response)
   });
 }
 
-// 3. Branches
+// 3. Batches / Session Timings
+export async function getBatches(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const batches = await Batch.find({ adminId }).sort({ createdAt: 1 });
+  res.json({ success: true, batches });
+}
+
+export async function createBatch(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const data = batchSchema.parse(req.body);
+
+  const existing = await Batch.findOne({ adminId, name: data.name.trim() });
+  if (existing) {
+    res.status(409).json({ success: false, code: 'BATCH_EXISTS', message: 'A batch with this name already exists' });
+    return;
+  }
+
+  const batch = await Batch.create({
+    adminId,
+    name: data.name.trim(),
+    startTime: data.startTime.trim(),
+    endTime: data.endTime.trim(),
+    description: data.description || '',
+    branchId: data.branchId ? new Types.ObjectId(data.branchId) : undefined,
+  });
+
+  res.status(201).json({ success: true, batch });
+}
+
+export async function updateBatch(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { batchId } = req.params;
+  const data = batchSchema.partial().parse(req.body);
+
+  const batch = await Batch.findOneAndUpdate({ _id: batchId, adminId }, data, { new: true });
+  if (!batch) {
+    res.status(404).json({ success: false, code: 'BATCH_NOT_FOUND', message: 'Batch not found' });
+    return;
+  }
+  res.json({ success: true, batch });
+}
+
+export async function deleteBatch(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { batchId } = req.params;
+
+  const activeCount = await SeatAssignment.countDocuments({ batchId, status: 'ACTIVE' });
+  if (activeCount > 0) {
+    res.status(400).json({
+      success: false,
+      code: 'BATCH_IN_USE',
+      message: `Cannot delete batch with ${activeCount} active assigned students. Reassign or remove them first.`,
+    });
+    return;
+  }
+
+  await Batch.findOneAndDelete({ _id: batchId, adminId });
+  res.json({ success: true, message: 'Batch deleted successfully' });
+}
+
+// 4. Branches
 export async function getBranches(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const branches = await Branch.find({ adminId }).sort({ createdAt: -1 });
 
-  // Get seat counts and active users per branch
   const branchesWithStats = await Promise.all(
     branches.map(async (b) => {
       const [seatCount, assignedSeatCount, userCount, manager] = await Promise.all([
         Seat.countDocuments({ branchId: b._id }),
-        Seat.countDocuments({ branchId: b._id, status: 'ASSIGNED' }),
+        SeatAssignment.countDocuments({ branchId: b._id, status: 'ACTIVE' }),
         User.countDocuments({ branchId: b._id }),
         Manager.findOne({ branchId: b._id, status: 'ACTIVE' }).select('name email phone'),
       ]);
@@ -222,20 +393,6 @@ export async function createBranch(req: AuthenticatedRequest, res: Response): Pr
   const data = branchSchema.parse(req.body);
   const branch = await Branch.create({ ...data, adminId });
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: branch._id,
-    action: 'BRANCH_CREATED',
-    target: 'Branch',
-    targetId: branch._id.toString(),
-    metadata: { name: branch.name },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.status(201).json({ success: true, branch });
 }
 
@@ -249,20 +406,6 @@ export async function updateBranch(req: AuthenticatedRequest, res: Response): Pr
     res.status(404).json({ success: false, code: 'BRANCH_NOT_FOUND', message: 'Branch not found' });
     return;
   }
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: branch._id,
-    action: 'BRANCH_UPDATED',
-    target: 'Branch',
-    targetId: branch._id.toString(),
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.json({ success: true, branch });
 }
 
@@ -284,7 +427,7 @@ export async function deleteBranch(req: AuthenticatedRequest, res: Response): Pr
   res.json({ success: true, message: 'Branch deleted' });
 }
 
-// 4. Managers
+// 5. Managers
 export async function getManagers(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const managers = await Manager.find({ adminId })
@@ -318,17 +461,9 @@ export async function createManager(req: AuthenticatedRequest, res: Response): P
   }
 
   const data = managerSchema.parse(req.body);
-
-  // Check branch belongs to this admin
-  const branch = await Branch.findOne({ _id: data.branchId, adminId });
-  if (!branch) {
-    res.status(400).json({ success: false, code: 'INVALID_BRANCH', message: 'Invalid branch ID' });
-    return;
-  }
-
-  const existingEmail = await Manager.findOne({ email: data.email });
-  if (existingEmail) {
-    res.status(409).json({ success: false, code: 'EMAIL_EXISTS', message: 'Email already registered' });
+  const existing = await Manager.findOne({ email: data.email });
+  if (existing) {
+    res.status(409).json({ success: false, code: 'EMAIL_EXISTS', message: 'Email already exists' });
     return;
   }
 
@@ -337,7 +472,7 @@ export async function createManager(req: AuthenticatedRequest, res: Response): P
 
   const manager = await Manager.create({
     adminId,
-    branchId: branch._id,
+    branchId: new Types.ObjectId(data.branchId),
     name: data.name,
     email: data.email,
     phone: data.phone,
@@ -345,45 +480,13 @@ export async function createManager(req: AuthenticatedRequest, res: Response): P
     status: 'ACTIVE',
   });
 
-  // Create default manager permissions
-  const permissions = await ManagerPermission.create({
+  await ManagerPermission.create({
     managerId: manager._id,
     adminId,
-    branchId: branch._id,
-    users_view: true,
-    users_create: true,
-    users_edit: false,
-    seats_view: true,
-    seats_assign: true,
-    queue_manage: true,
-    entries_manage: true,
-    payments_view: true,
-    expenses_manage: false,
-    expenses_add: true,
-    expenses_view: true,
-    reminders_send: true,
-    dashboard_view: true,
+    branchId: manager.branchId,
   });
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: branch._id,
-    action: 'MANAGER_CREATED',
-    target: 'Manager',
-    targetId: manager._id.toString(),
-    metadata: { name: manager.name, email: manager.email },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
-  res.status(201).json({
-    success: true,
-    manager: { ...manager.toObject(), password: undefined },
-    permissions,
-  });
+  res.status(201).json({ success: true, manager: { ...manager.toObject(), password: undefined } });
 }
 
 export async function updateManagerPermissions(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -403,20 +506,6 @@ export async function updateManagerPermissions(req: AuthenticatedRequest, res: R
     { upsert: true, new: true }
   );
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: manager.branchId,
-    action: 'PERMISSION_CHANGED',
-    target: 'ManagerPermission',
-    targetId: manager._id.toString(),
-    metadata: permissionsData,
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.json({ success: true, permissions: updatedPerms });
 }
 
@@ -434,7 +523,7 @@ export async function deleteManager(req: AuthenticatedRequest, res: Response): P
   res.json({ success: true, message: 'Manager removed' });
 }
 
-// 5. User Plans
+// 6. User Plans (Created by Admin for their Students)
 export async function getUserPlans(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const plans = await UserPlan.find({ adminId }).sort({ price: 1 });
@@ -446,20 +535,6 @@ export async function createUserPlan(req: AuthenticatedRequest, res: Response): 
   const data = userPlanSchema.parse(req.body);
 
   const plan = await UserPlan.create({ ...data, adminId });
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    action: 'PLAN_CREATED',
-    target: 'UserPlan',
-    targetId: plan._id.toString(),
-    metadata: { name: plan.name, price: plan.price },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.status(201).json({ success: true, plan });
 }
 
@@ -485,7 +560,7 @@ export async function deleteUserPlan(req: AuthenticatedRequest, res: Response): 
   res.json({ success: true, message: 'User plan deleted' });
 }
 
-// 6. Seats
+// 7. Seats (Batch-Wise Timing Logic)
 export async function getSeats(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const branchId = req.query.branchId as string;
@@ -501,10 +576,65 @@ export async function getSeats(req: AuthenticatedRequest, res: Response): Promis
 
   const seats = await Seat.find(query)
     .populate('branchId', 'name')
-    .populate('assignedUserId', 'name email phone whatsappNumber')
     .sort({ seatNumber: 1 });
 
-  res.json({ success: true, seats });
+  const seatIds = seats.map(s => s._id);
+
+  // Fetch all active assignments across all batches
+  const activeAssignments = await SeatAssignment.find({
+    seatId: { $in: seatIds },
+    status: 'ACTIVE',
+  })
+    .populate('batchId', 'name startTime endTime')
+    .populate('userId', 'name phone photo classCourse parentName parentPhone entryStatus planEndDate idCardNumber');
+
+  const seatsWithBatches = seats.map(seat => {
+    const assignments = activeAssignments.filter(a => a.seatId.toString() === seat._id.toString());
+    return {
+      ...seat.toObject(),
+      activeAssignments: assignments,
+      isOccupied: assignments.length > 0,
+      occupiedBatchCount: assignments.length,
+    };
+  });
+
+  res.json({ success: true, seats: seatsWithBatches });
+}
+
+// Get all batch details & students assigned to a particular seat
+export async function getSeatBatchDetails(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { seatId } = req.params;
+
+  const seat = await Seat.findOne({ _id: seatId, adminId }).populate('branchId', 'name address');
+  if (!seat) {
+    res.status(404).json({ success: false, code: 'SEAT_NOT_FOUND', message: 'Seat not found' });
+    return;
+  }
+
+  const batches = await Batch.find({ adminId, isActive: true }).sort({ name: 1 });
+  const assignments = await SeatAssignment.find({ seatId: seat._id, status: 'ACTIVE' })
+    .populate('batchId')
+    .populate({
+      path: 'userId',
+      populate: { path: 'currentPlan', select: 'name price validity validityUnit' },
+    });
+
+  const batchMap = batches.map(batch => {
+    const assignment = assignments.find(a => (a.batchId as any)?._id?.toString() === batch._id.toString());
+    return {
+      batch,
+      isOccupied: !!assignment,
+      assignment: assignment || null,
+      student: assignment ? assignment.userId : null,
+    };
+  });
+
+  res.json({
+    success: true,
+    seat,
+    batches: batchMap,
+  });
 }
 
 export async function createSeat(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -526,194 +656,146 @@ export async function createSeat(req: AuthenticatedRequest, res: Response): Prom
     return;
   }
 
+  const existingSeat = await Seat.findOne({ branchId: branch._id, seatNumber: data.seatNumber.trim() });
+  if (existingSeat) {
+    res.status(409).json({ success: false, code: 'SEAT_EXISTS', message: 'A seat with this number already exists in this branch' });
+    return;
+  }
+
   const seat = await Seat.create({
     adminId,
     branchId: branch._id,
-    seatNumber: data.seatNumber,
+    seatNumber: data.seatNumber.trim().toUpperCase(),
     status: 'AVAILABLE',
   });
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: branch._id,
-    action: 'SEAT_CREATED',
-    target: 'Seat',
-    targetId: seat._id.toString(),
-    metadata: { seatNumber: seat.seatNumber },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.status(201).json({ success: true, seat });
-}
-
-export async function assignSeat(req: AuthenticatedRequest, res: Response): Promise<void> {
-  const adminId = getAdminId(req);
-  const data = assignSeatSchema.parse(req.body);
-
-  const seat = await Seat.findOne({ _id: data.seatId, adminId });
-  if (!seat) {
-    res.status(404).json({ success: false, code: 'SEAT_NOT_FOUND', message: 'Seat not found' });
-    return;
-  }
-
-  const user = await User.findOne({ _id: data.userId, adminId });
-  if (!user) {
-    res.status(404).json({ success: false, code: 'USER_NOT_FOUND', message: 'User not found' });
-    return;
-  }
-
-  // Update seat
-  seat.status = 'ASSIGNED';
-  seat.assignedUserId = user._id;
-  seat.assignedFrom = new Date(data.startDate);
-  seat.assignedUntil = new Date(data.endDate);
-  await seat.save();
-
-  // Update user
-  user.currentSeat = seat._id;
-  user.entryStatus = 'ACTIVE';
-  await user.save();
-
-  // Create seat assignment history
-  const assignment = await SeatAssignment.create({
-    adminId,
-    branchId: seat.branchId,
-    seatId: seat._id,
-    userId: user._id,
-    startDate: new Date(data.startDate),
-    endDate: new Date(data.endDate),
-    status: 'ACTIVE',
-    assignedBy: new Types.ObjectId(req.user!.id),
-    assignedByRole: req.user!.role,
-    notes: data.notes,
-  });
-
-  await createNotification({
-    recipientRole: 'USER',
-    recipientId: user._id,
-    title: 'Seat Assigned',
-    message: `Seat ${seat.seatNumber} has been allocated to you until ${new Date(data.endDate).toLocaleDateString()}.`,
-    type: 'SEAT',
-  });
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: seat.branchId,
-    action: 'SEAT_ASSIGNED',
-    target: 'Seat',
-    targetId: seat._id.toString(),
-    metadata: { seatNumber: seat.seatNumber, userName: user.name, endDate: data.endDate },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
-  res.json({ success: true, message: 'Seat assigned successfully', seat, assignment });
-}
-
-export async function unassignSeat(req: AuthenticatedRequest, res: Response): Promise<void> {
-  const adminId = getAdminId(req);
-  const { seatId } = req.params;
-
-  const seat = await Seat.findOne({ _id: seatId, adminId });
-  if (!seat) {
-    res.status(404).json({ success: false, code: 'SEAT_NOT_FOUND', message: 'Seat not found' });
-    return;
-  }
-
-  const previousUserId = seat.assignedUserId;
-
-  seat.status = 'AVAILABLE';
-  seat.assignedUserId = undefined;
-  seat.assignedFrom = undefined;
-  seat.assignedUntil = undefined;
-  await seat.save();
-
-  if (previousUserId) {
-    await User.findByIdAndUpdate(previousUserId, { $unset: { currentSeat: 1 } });
-    await SeatAssignment.updateMany(
-      { seatId: seat._id, userId: previousUserId, status: 'ACTIVE' },
-      { status: 'RELEASED' }
-    );
-
-    await createNotification({
-      recipientRole: 'USER',
-      recipientId: previousUserId,
-      title: 'Seat Released',
-      message: `Your seat ${seat.seatNumber} has been released.`,
-      type: 'SEAT',
-    });
-  }
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: seat.branchId,
-    action: 'SEAT_UNASSIGNED',
-    target: 'Seat',
-    targetId: seat._id.toString(),
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
-  res.json({ success: true, message: 'Seat released', seat });
 }
 
 export async function deleteSeat(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const { seatId } = req.params;
 
+  const activeAssignments = await SeatAssignment.countDocuments({ seatId, status: 'ACTIVE' });
+  if (activeAssignments > 0) {
+    res.status(400).json({
+      success: false,
+      code: 'SEAT_IN_USE',
+      message: `Cannot delete seat with ${activeAssignments} active student assignment(s). Reassign them first.`,
+    });
+    return;
+  }
+
   await Seat.findOneAndDelete({ _id: seatId, adminId });
   res.json({ success: true, message: 'Seat deleted' });
 }
 
-// 7. Users
+// 8. Users / Students (Admin adding without user creds, with batch, seat & plan)
 export async function getUsers(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const page = parseInt(req.query.page as string || '1', 10);
-  const limit = parseInt(req.query.limit as string || '20', 10);
+  const limit = parseInt(req.query.limit as string || '50', 10);
   const search = (req.query.search as string || '').trim();
-  const entryStatus = req.query.entryStatus as string;
+  const filter = (req.query.filter as string || 'all').toLowerCase();
   const branchId = req.query.branchId as string;
 
   const query: any = { adminId };
-  if (entryStatus) query.entryStatus = entryStatus;
-  if (branchId && Types.ObjectId.isValid(branchId)) query.branchId = new Types.ObjectId(branchId);
-  if (search) {
+  if (branchId && Types.ObjectId.isValid(branchId)) {
+    query.branchId = new Types.ObjectId(branchId);
+  }
+
+  const now = new Date();
+  const fiveDaysFromNow = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000);
+
+  // Filters: All user, plan expired user, plan about to expire user (< 5 days remaining)
+  if (filter === 'expiring_soon') {
+    query.planEndDate = { $gte: now, $lte: fiveDaysFromNow };
+    query.entryStatus = { $ne: 'EXPIRED' };
+  } else if (filter === 'expired') {
     query.$or = [
-      { name: { $regex: search, $options: 'i' } },
-      { email: { $regex: search, $options: 'i' } },
-      { phone: { $regex: search, $options: 'i' } },
+      { planEndDate: { $lt: now } },
+      { entryStatus: 'EXPIRED' },
+    ];
+  } else if (filter === 'active') {
+    query.planEndDate = { $gt: now };
+    query.entryStatus = 'ACTIVE';
+  }
+
+  if (search) {
+    query.$and = [
+      ...(query.$and || []),
+      {
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { phone: { $regex: search, $options: 'i' } },
+          { parentName: { $regex: search, $options: 'i' } },
+          { parentPhone: { $regex: search, $options: 'i' } },
+          { classCourse: { $regex: search, $options: 'i' } },
+          { idCardNumber: { $regex: search, $options: 'i' } },
+        ],
+      },
     ];
   }
 
-  const [users, total] = await Promise.all([
+  const [users, total, counts] = await Promise.all([
     User.find(query)
-      .populate('branchId', 'name')
+      .populate('branchId', 'name address')
+      .populate('batchId', 'name startTime endTime')
       .populate('currentSeat', 'seatNumber')
-      .populate('currentSubscription')
+      .populate('currentPlan', 'name price validity validityUnit')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .select('-password'),
     User.countDocuments(query),
+    Promise.all([
+      User.countDocuments({ adminId }),
+      User.countDocuments({ adminId, planEndDate: { $gt: now }, entryStatus: 'ACTIVE' }),
+      User.countDocuments({ adminId, planEndDate: { $gte: now, $lte: fiveDaysFromNow }, entryStatus: { $ne: 'EXPIRED' } }),
+      User.countDocuments({ adminId, $or: [{ planEndDate: { $lt: now } }, { entryStatus: 'EXPIRED' }] }),
+    ]),
   ]);
+
+  const [totalAll, totalActive, totalExpiringSoon, totalExpired] = counts;
+
+  const usersWithDaysRemaining = users.map(u => {
+    const expiry = u.planEndDate ? new Date(u.planEndDate) : null;
+    let daysRemaining = 0;
+    let isExpired = false;
+    let isExpiringSoon = false;
+
+    if (expiry) {
+      const diffMs = expiry.getTime() - now.getTime();
+      daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      if (daysRemaining <= 0 || u.entryStatus === 'EXPIRED') {
+        isExpired = true;
+      } else if (daysRemaining <= 5) {
+        isExpiringSoon = true;
+      }
+    }
+
+    return {
+      ...u.toObject(),
+      daysRemaining,
+      isExpired,
+      isExpiringSoon,
+    };
+  });
 
   res.json({
     success: true,
-    users,
+    users: usersWithDaysRemaining,
+    counts: {
+      all: totalAll,
+      active: totalActive,
+      expiring_soon: totalExpiringSoon,
+      expired: totalExpired,
+    },
     pagination: { page, limit, total, pages: Math.ceil(total / limit) },
   });
 }
 
+// Admin adding student with required details, batch timing, seat and plan
 export async function createUser(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const limitCheck = await checkPlanLimit(adminId, 'users');
@@ -721,51 +803,357 @@ export async function createUser(req: AuthenticatedRequest, res: Response): Prom
     res.status(403).json({
       success: false,
       code: 'PLAN_LIMIT_REACHED',
-      message: limitCheck.message || 'Maximum user limit reached for your plan.',
+      message: limitCheck.message || 'Maximum student limit reached for your plan.',
     });
     return;
   }
 
-  const data = userRegisterSchema.parse({ ...req.body, adminId: adminId.toString() });
+  const data = createStudentSchema.parse(req.body);
 
-  const existing = await User.findOne({ adminId, email: data.email });
-  if (existing) {
-    res.status(409).json({ success: false, code: 'EMAIL_EXISTS', message: 'User already exists' });
+  // 1. Phone number must be unique per admin
+  const existingPhone = await User.findOne({ adminId, phone: data.phone.trim() });
+  if (existingPhone) {
+    res.status(409).json({
+      success: false,
+      code: 'PHONE_EXISTS',
+      message: `A student with phone number ${data.phone} already exists in your library.`,
+    });
     return;
   }
 
-  const salt = await bcrypt.genSalt(10);
-  const hashedPassword = await bcrypt.hash(data.password, salt);
+  // 2. Validate Branch
+  const branch = await Branch.findOne({ _id: data.branchId, adminId });
+  if (!branch) {
+    res.status(400).json({ success: false, code: 'INVALID_BRANCH', message: 'Selected branch not found.' });
+    return;
+  }
 
+  // 3. Validate Batch
+  const batch = await Batch.findOne({ _id: data.batchId, adminId });
+  if (!batch) {
+    res.status(400).json({ success: false, code: 'INVALID_BATCH', message: 'Selected session batch not found.' });
+    return;
+  }
+
+  // 4. Validate Seat
+  const seat = await Seat.findOne({ _id: data.seatId, adminId });
+  if (!seat) {
+    res.status(400).json({ success: false, code: 'INVALID_SEAT', message: 'Selected seat not found.' });
+    return;
+  }
+
+  // 5. Timing-based check: One seat CANNOT be assigned to multiple users in the SAME batch!
+  const existingSeatInBatch = await SeatAssignment.findOne({
+    seatId: seat._id,
+    batchId: batch._id,
+    status: 'ACTIVE',
+  });
+
+  if (existingSeatInBatch) {
+    res.status(400).json({
+      success: false,
+      code: 'SEAT_ALREADY_ASSIGNED_IN_BATCH',
+      message: `Seat ${seat.seatNumber} is already occupied in ${batch.name}. A seat cannot be given to multiple students in the same batch. Please pick another seat or batch.`,
+    });
+    return;
+  }
+
+  // 6. Validate Admin UserPlan
+  const plan = await UserPlan.findOne({ _id: data.planId, adminId });
+  if (!plan) {
+    res.status(400).json({ success: false, code: 'INVALID_PLAN', message: 'Selected library plan not found.' });
+    return;
+  }
+
+  // Calculate validity dates
+  const planStartDate = new Date();
+  const planEndDate = calculateExpiryDate(plan.validity, plan.validityUnit, planStartDate);
+  const idCardNumber = `LIB-${Date.now().toString().slice(-6)}`;
+
+  // Create User
   const user = await User.create({
     adminId,
-    branchId: data.branchId ? new Types.ObjectId(data.branchId) : undefined,
+    branchId: branch._id,
+    batchId: batch._id,
+    currentSeat: seat._id,
+    currentPlan: plan._id,
     name: data.name,
-    email: data.email,
     phone: data.phone,
-    whatsappNumber: data.whatsappNumber,
+    whatsappNumber: data.phone,
+    classCourse: data.classCourse || '',
+    address: data.address || '',
+    photo: data.photo || '',
+    parentName: data.parentName,
+    parentPhone: data.parentPhone,
+    aadharNumber: data.aadharNumber || '',
     dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
-    address: data.address,
-    emergencyContact: data.emergencyContact,
-    password: hashedPassword,
+    gender: data.gender || 'Male',
+    email: data.email || undefined,
+    planStartDate,
+    planEndDate,
+    idCardNumber,
     entryStatus: 'ACTIVE',
   });
+
+  // Create active SeatAssignment with batch
+  await SeatAssignment.create({
+    adminId,
+    branchId: branch._id,
+    seatId: seat._id,
+    batchId: batch._id,
+    userId: user._id,
+    startDate: planStartDate,
+    endDate: planEndDate,
+    status: 'ACTIVE',
+    assignedBy: new Types.ObjectId(req.user!.id),
+    assignedByRole: req.user!.role,
+    notes: `Enrolled under ${plan.name} in ${batch.name}`,
+  });
+
+  // Update seat status
+  await Seat.findByIdAndUpdate(seat._id, { status: 'ASSIGNED' });
+
+  // Record income: when user created with a plan, consider the amount of this plan as INCOME!
+  const payment = await Payment.create({
+    type: 'USER_PLAN',
+    adminId,
+    userId: user._id,
+    planId: plan._id,
+    planName: plan.name,
+    amount: plan.price,
+    currency: plan.currency || 'INR',
+    utr: `ADM-${Date.now().toString().slice(-8)}`,
+    status: 'APPROVED',
+    reviewedBy: new Types.ObjectId(req.user!.id),
+    reviewedByRole: req.user!.role,
+    reviewedAt: new Date(),
+    submittedAt: new Date(),
+  });
+
+  // Try optional WhatsApp admission notice (if quota permits)
+  try {
+    await sendWhatsAppAlert({
+      adminId,
+      user,
+      templateKey: 'ADMISSION_WELCOME',
+      variables: {
+        seatNumber: seat.seatNumber,
+        batchName: batch.name,
+        planName: plan.name,
+      },
+      sentBy: 'ADMIN',
+    });
+  } catch (waErr: any) {
+    console.log('ℹ️ [WhatsApp] Welcome notification quota notice:', waErr.message);
+  }
 
   await logAudit({
     actorId: req.user!.id,
     actorRole: req.user!.role,
     actorName: req.user!.name,
     adminId,
-    branchId: user.branchId,
+    branchId: branch._id,
     action: 'USER_CREATED',
     target: 'User',
     targetId: user._id.toString(),
-    metadata: { name: user.name },
+    metadata: { name: user.name, seat: seat.seatNumber, batch: batch.name, planPrice: plan.price },
     ip: req.ip,
     userAgent: req.get('user-agent'),
   });
 
-  res.status(201).json({ success: true, user: { ...user.toObject(), password: undefined } });
+  res.status(201).json({
+    success: true,
+    message: 'Student created successfully with assigned seat and plan!',
+    user,
+    payment,
+  });
+}
+
+// Renew student's plan & record as INCOME
+export async function renewUserPlan(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { userId } = req.params;
+  const { planId, paymentMode, notes } = renewPlanSchema.parse(req.body);
+
+  const user = await User.findOne({ _id: userId, adminId });
+  if (!user) {
+    res.status(404).json({ success: false, code: 'USER_NOT_FOUND', message: 'Student record not found.' });
+    return;
+  }
+
+  const plan = await UserPlan.findOne({ _id: planId, adminId });
+  if (!plan) {
+    res.status(404).json({ success: false, code: 'PLAN_NOT_FOUND', message: 'Library plan not found.' });
+    return;
+  }
+
+  const now = new Date();
+  let baseDate = now;
+  if (user.planEndDate && new Date(user.planEndDate) > now) {
+    baseDate = new Date(user.planEndDate);
+  }
+
+  const newEndDate = calculateExpiryDate(plan.validity, plan.validityUnit, baseDate);
+
+  user.currentPlan = plan._id;
+  user.planEndDate = newEndDate;
+  user.entryStatus = 'ACTIVE';
+  user.whatsappRemindersSent = undefined; // Reset for next expiry cycle
+  await user.save();
+
+  // Extend active seat assignments
+  if (user.currentSeat) {
+    await SeatAssignment.updateMany(
+      { userId: user._id, status: 'ACTIVE' },
+      { $set: { endDate: newEndDate } }
+    );
+  }
+
+  // Record plan renewal as INCOME
+  const payment = await Payment.create({
+    type: 'USER_PLAN',
+    adminId,
+    userId: user._id,
+    planId: plan._id,
+    planName: plan.name,
+    amount: plan.price,
+    currency: plan.currency || 'INR',
+    utr: `RNW-${Date.now().toString().slice(-8)}`,
+    status: 'APPROVED',
+    reviewedBy: new Types.ObjectId(req.user!.id),
+    reviewedByRole: req.user!.role,
+    reviewedAt: new Date(),
+    submittedAt: new Date(),
+  });
+
+  // Try WhatsApp renewal alert
+  try {
+    const seat = user.currentSeat ? await Seat.findById(user.currentSeat) : null;
+    const batch = user.batchId ? await Batch.findById(user.batchId) : null;
+    await sendWhatsAppAlert({
+      adminId,
+      user,
+      templateKey: 'PLAN_RENEWED',
+      variables: {
+        seatNumber: seat?.seatNumber,
+        batchName: batch?.name,
+        planName: plan.name,
+      },
+      sentBy: 'ADMIN',
+    });
+  } catch (waErr: any) {
+    console.log('ℹ️ [WhatsApp] Renewal notification quota notice:', waErr.message);
+  }
+
+  res.json({
+    success: true,
+    message: `Plan renewed successfully until ${newEndDate.toLocaleDateString()}. Recorded ₹${plan.price} in library income!`,
+    user,
+    payment,
+  });
+}
+
+// Student ID Card Generation
+export async function getStudentIdCard(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { userId } = req.params;
+
+  const [admin, user] = await Promise.all([
+    Admin.findById(adminId),
+    User.findOne({ _id: userId, adminId })
+      .populate('branchId')
+      .populate('batchId')
+      .populate('currentSeat')
+      .populate('currentPlan'),
+  ]);
+
+  if (!user) {
+    res.status(404).json({ success: false, code: 'USER_NOT_FOUND', message: 'Student not found.' });
+    return;
+  }
+
+  const branch = user.branchId as any;
+
+  res.json({
+    success: true,
+    idCard: {
+      student: {
+        id: user._id,
+        idCardNumber: user.idCardNumber || `LIB-${user._id.toString().slice(-6).toUpperCase()}`,
+        name: user.name,
+        phone: user.phone,
+        classCourse: user.classCourse || 'General Reading',
+        address: user.address,
+        photo: user.photo,
+        parentName: user.parentName,
+        parentPhone: user.parentPhone,
+        aadharNumber: user.aadharNumber,
+        dateOfBirth: user.dateOfBirth,
+        gender: user.gender,
+        planName: (user.currentPlan as any)?.name || 'Standard Plan',
+        planStartDate: user.planStartDate || user.createdAt,
+        planEndDate: user.planEndDate,
+      },
+      library: {
+        organizationName: admin?.organizationName || 'Study Reading Library',
+        phone: admin?.phone,
+        email: admin?.email,
+        whatsappNumber: admin?.whatsappNumber,
+        branchName: branch?.name || 'Main Campus',
+        branchAddress: branch?.address || '',
+        branchPhone: branch?.phone || admin?.phone,
+        branchEmail: branch?.email || admin?.email,
+      },
+      seat: {
+        seatNumber: (user.currentSeat as any)?.seatNumber || 'Unassigned',
+      },
+      batch: {
+        name: (user.batchId as any)?.name || 'Full Day',
+        timing: (user.batchId as any) ? `${(user.batchId as any).startTime} - ${(user.batchId as any).endTime}` : 'Flexible',
+      },
+    },
+  });
+}
+
+// WhatsApp Templates & Sender
+export async function getWhatsAppTemplates(_req: AuthenticatedRequest, res: Response): Promise<void> {
+  res.json({ success: true, templates: Object.values(WHATSAPP_TEMPLATES) });
+}
+
+export async function sendManualWhatsApp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const adminId = getAdminId(req);
+  const { userId, templateKey, customMessage } = req.body;
+
+  const user = await User.findOne({ _id: userId, adminId })
+    .populate('currentSeat')
+    .populate('batchId')
+    .populate('currentPlan');
+
+  if (!user) {
+    res.status(404).json({ success: false, code: 'USER_NOT_FOUND', message: 'Student not found.' });
+    return;
+  }
+
+  try {
+    const result = await sendWhatsAppAlert({
+      adminId,
+      user,
+      templateKey: templateKey || 'CUSTOM',
+      variables: { customMessage },
+      sentBy: 'ADMIN',
+    });
+
+    res.json({
+      ...result,
+      message: 'WhatsApp alert recorded and ready to send.',
+    });
+  } catch (err: any) {
+    res.status(403).json({
+      success: false,
+      code: 'QUOTA_EXCEEDED',
+      message: err.message || 'WhatsApp alert quota exceeded. Please upgrade your SaaS plan.',
+    });
+  }
 }
 
 export async function updateUserEntryStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -784,23 +1172,10 @@ export async function updateUserEntryStatus(req: AuthenticatedRequest, res: Resp
     return;
   }
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    action: 'USER_UPDATED',
-    target: 'User',
-    targetId: user._id.toString(),
-    metadata: { entryStatus },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.json({ success: true, user });
 }
 
-// 8. Queue System
+// 9. Queue System
 export async function getQueue(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const branchId = req.query.branchId as string;
@@ -811,7 +1186,7 @@ export async function getQueue(req: AuthenticatedRequest, res: Response): Promis
   }
 
   const queue = await QueueEntry.find(query)
-    .populate('userId', 'name email phone whatsappNumber')
+    .populate('userId', 'name phone whatsappNumber classCourse')
     .populate('branchId', 'name')
     .sort({ priority: -1, createdAt: 1 });
 
@@ -849,23 +1224,6 @@ export async function addToQueue(req: AuthenticatedRequest, res: Response): Prom
     addedByRole: req.user!.role,
   });
 
-  user.entryStatus = 'QUEUE';
-  await user.save();
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: queueEntry.branchId,
-    action: 'QUEUE_ADDED',
-    target: 'QueueEntry',
-    targetId: queueEntry._id.toString(),
-    metadata: { userName: user.name },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.status(201).json({ success: true, queueEntry });
 }
 
@@ -885,27 +1243,6 @@ export async function promoteQueueUser(req: AuthenticatedRequest, res: Response)
 
   await User.findByIdAndUpdate(entry.userId, { entryStatus: 'ACTIVE' });
 
-  await createNotification({
-    recipientRole: 'USER',
-    recipientId: entry.userId,
-    title: 'Promoted from Queue!',
-    message: 'Your turn has arrived! Your entry status is now active.',
-    type: 'QUEUE',
-  });
-
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: entry.branchId,
-    action: 'QUEUE_PROMOTED',
-    target: 'QueueEntry',
-    targetId: entry._id.toString(),
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.json({ success: true, message: 'User promoted successfully', entry });
 }
 
@@ -922,12 +1259,10 @@ export async function removeFromQueue(req: AuthenticatedRequest, res: Response):
   entry.status = 'REMOVED';
   await entry.save();
 
-  await User.findByIdAndUpdate(entry.userId, { entryStatus: 'NONE' });
-
   res.json({ success: true, message: 'Removed from queue' });
 }
 
-// 9. Expenses
+// 10. Expenses
 export async function getExpenses(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const branchId = req.query.branchId as string;
@@ -976,24 +1311,10 @@ export async function createExpense(req: AuthenticatedRequest, res: Response): P
     recordedByRole: req.user!.role,
   });
 
-  await logAudit({
-    actorId: req.user!.id,
-    actorRole: req.user!.role,
-    actorName: req.user!.name,
-    adminId,
-    branchId: branch._id,
-    action: 'EXPENSE_CREATED',
-    target: 'Expense',
-    targetId: expense._id.toString(),
-    metadata: { title: expense.title, amount: expense.amount },
-    ip: req.ip,
-    userAgent: req.get('user-agent'),
-  });
-
   res.status(201).json({ success: true, expense });
 }
 
-// 10. Patron Payments
+// 11. Payments & Reviews
 export async function getPayments(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const status = req.query.status as string;
@@ -1002,7 +1323,7 @@ export async function getPayments(req: AuthenticatedRequest, res: Response): Pro
   if (status) query.status = status;
 
   const payments = await Payment.find(query)
-    .populate('userId', 'name email phone whatsappNumber')
+    .populate('userId', 'name phone whatsappNumber classCourse')
     .sort({ createdAt: -1 });
 
   res.json({ success: true, payments });
@@ -1033,93 +1354,29 @@ export async function reviewPayment(req: AuthenticatedRequest, res: Response): P
     await payment.save();
 
     const plan = await UserPlan.findById(payment.planId);
-    if (!plan) {
-      res.status(400).json({ success: false, code: 'PLAN_NOT_FOUND', message: 'Referenced user plan not found' });
-      return;
-    }
+    if (plan && payment.userId) {
+      const startDate = new Date();
+      const expiresAt = calculateExpiryDate(plan.validity, plan.validityUnit, startDate);
 
-    const startDate = new Date();
-    const expiresAt = calculateExpiryDate(plan.validity, plan.validityUnit, startDate);
-
-    const subscription = await Subscription.create({
-      type: 'LIBRARY_USER',
-      adminId,
-      userId: payment.userId,
-      planId: plan._id,
-      planSnapshot: {
-        name: plan.name,
-        price: plan.price,
-        validity: plan.validity,
-        validityUnit: plan.validityUnit,
-      },
-      startDate,
-      expiresAt,
-      status: 'ACTIVE',
-      paymentId: payment._id,
-    });
-
-    if (payment.userId) {
       await User.findByIdAndUpdate(payment.userId, {
-        currentSubscription: subscription._id,
+        currentPlan: plan._id,
+        planStartDate: startDate,
+        planEndDate: expiresAt,
         entryStatus: 'ACTIVE',
       });
-
-      await createNotification({
-        recipientRole: 'USER',
-        recipientId: payment.userId,
-        title: 'Subscription Activated! 🎉',
-        message: `Your payment of ₹${payment.amount} for "${plan.name}" has been approved. Valid until ${expiresAt.toLocaleDateString()}.`,
-        type: 'PAYMENT',
-      });
     }
 
-    await logAudit({
-      actorId: req.user!.id,
-      actorRole: req.user!.role,
-      actorName: req.user!.name,
-      adminId,
-      action: 'PAYMENT_APPROVED',
-      target: 'Payment',
-      targetId: payment._id.toString(),
-      metadata: { amount: payment.amount, expiresAt },
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-    });
-
-    res.json({ success: true, message: 'User payment approved and membership activated', payment, subscription });
+    res.json({ success: true, message: 'User payment approved and membership activated', payment });
   } else {
     payment.status = 'REJECTED';
     payment.rejectionReason = rejectionReason || 'Payment verification failed';
     await payment.save();
 
-    if (payment.userId) {
-      await createNotification({
-        recipientRole: 'USER',
-        recipientId: payment.userId,
-        title: 'Payment Rejected',
-        message: `Your payment of ₹${payment.amount} was rejected: ${payment.rejectionReason}`,
-        type: 'PAYMENT',
-      });
-    }
-
-    await logAudit({
-      actorId: req.user!.id,
-      actorRole: req.user!.role,
-      actorName: req.user!.name,
-      adminId,
-      action: 'PAYMENT_REJECTED',
-      target: 'Payment',
-      targetId: payment._id.toString(),
-      metadata: { reason: payment.rejectionReason },
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-    });
-
     res.json({ success: true, message: 'Payment rejected', payment });
   }
 }
 
-// 11. Payment Config
+// 12. Payment Config
 export async function getPaymentConfig(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const config = await PaymentConfig.findOne({ scope: 'ADMIN', adminId });
@@ -1139,7 +1396,7 @@ export async function updatePaymentConfig(req: AuthenticatedRequest, res: Respon
   res.json({ success: true, config });
 }
 
-// 12. WhatsApp Expiry Reminders
+// 13. WhatsApp Expiry Reminders
 export async function getWhatsAppReminders(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const reminders = await generateOrGetExpiryReminders(adminId);
@@ -1159,7 +1416,7 @@ export async function markReminderOpened(req: AuthenticatedRequest, res: Respons
   res.json({ success: true, log });
 }
 
-// 13. Audit Logs
+// 14. Audit Logs
 export async function getAuditLogs(req: AuthenticatedRequest, res: Response): Promise<void> {
   const adminId = getAdminId(req);
   const page = parseInt(req.query.page as string || '1', 10);

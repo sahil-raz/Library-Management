@@ -78,25 +78,16 @@ export async function login(req: Request, res: Response): Promise<void> {
     }
   }
 
-  // 4. Check User
+  // 4. Student login is completely disabled per specification
   if (!userObj) {
     const user = await User.findOne({ email });
     if (user) {
-      if (user.entryStatus === 'SUSPENDED') {
-        res.status(403).json({
-          success: false,
-          code: 'ACCOUNT_SUSPENDED',
-          message: 'Your membership is suspended. Please contact the library administrator.',
-        });
-        return;
-      }
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (isMatch) {
-        userObj = user;
-        role = 'USER';
-        adminId = user.adminId.toString();
-        branchId = user.branchId?.toString();
-      }
+      res.status(403).json({
+        success: false,
+        code: 'USER_LOGIN_DISABLED',
+        message: 'Student login has been disabled. Library memberships and seats are managed directly by Library Administration.',
+      });
+      return;
     }
   }
 

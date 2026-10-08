@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  sendAdminOtp,
   registerAdmin,
   registerUser,
   getPublicLibraries,
@@ -13,6 +14,7 @@ const router = Router();
 
 router.get('/site-settings', getPublicSiteSettings);
 router.get('/config', getPublicSiteSettings);
+router.post('/admin/send-otp', authLimiter, sendAdminOtp);
 router.post('/admin/register', authLimiter, registerAdmin);
 router.post('/user/register', authLimiter, registerUser);
 router.post('/register', authLimiter, registerUser);

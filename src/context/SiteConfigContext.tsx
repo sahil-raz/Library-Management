@@ -20,7 +20,7 @@ interface SiteConfigContextType {
 }
 
 const defaultData: SiteSettingsData = {
-  siteName: 'Libr',
+  siteName: 'Library',
   siteTagline: 'Multi-Library & Study Center Management',
   description: 'Production-Ready Mobile-First Multi-Library Management SaaS & Study Space Platform',
   supportEmail: 'support@libr.com',
@@ -77,7 +77,7 @@ export const SiteConfigProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   return (
     <SiteConfigContext.Provider
       value={{
-        siteName: settings.siteName || 'Libr',
+        siteName: settings.siteName || 'Library',
         siteTagline: settings.siteTagline || 'Library Management',
         description: settings.description || defaultData.description,
         settings,

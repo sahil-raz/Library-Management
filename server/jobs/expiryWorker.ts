@@ -2,12 +2,14 @@ import { Subscription } from '../models/Subscription.js';
 import { Seat } from '../models/Seat.js';
 import { SeatAssignment } from '../models/SeatAssignment.js';
 import { User } from '../models/User.js';
+import { sendWhatsAppAlert } from '../services/whatsappService.js';
 import { createNotification } from '../services/notificationService.js';
 import { logAudit } from '../services/auditService.js';
 
 export async function runSubscriptionExpiryJob(): Promise<void> {
   try {
     const now = new Date();
+    const twoDaysFromNow = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
 
     // 1. Expire Admin subscriptions past expiresAt
     const expiredAdminSubs = await Subscription.find({
@@ -40,31 +42,68 @@ export async function runSubscriptionExpiryJob(): Promise<void> {
       });
     }
 
-    // 2. Expire User subscriptions past expiresAt
-    const expiredUserSubs = await Subscription.find({
-      type: 'LIBRARY_USER',
-      status: 'ACTIVE',
-      expiresAt: { $lt: now },
-    });
+    // 2. Automated WhatsApp Expiry Notice: 2 Days Before Expiry
+    const expiringSoonUsers = await User.find({
+      planEndDate: { $gt: now, $lte: twoDaysFromNow },
+      entryStatus: 'ACTIVE',
+      'whatsappRemindersSent.twoDaysBefore': { $exists: false },
+    })
+      .populate('currentSeat')
+      .populate('batchId')
+      .populate('currentPlan');
 
-    for (const sub of expiredUserSubs) {
-      sub.status = 'EXPIRED';
-      await sub.save();
-
-      if (sub.userId) {
-        await User.findByIdAndUpdate(sub.userId, { entryStatus: 'EXPIRED' });
-
-        await createNotification({
-          recipientRole: 'USER',
-          recipientId: sub.userId,
-          title: 'Membership Expired',
-          message: 'Your library membership subscription has expired. Please renew to keep your seat and access.',
-          type: 'EXPIRY',
+    for (const user of expiringSoonUsers) {
+      try {
+        await sendWhatsAppAlert({
+          adminId: user.adminId,
+          user,
+          templateKey: 'EXPIRY_2_DAYS',
+          sentBy: 'SYSTEM',
         });
+
+        user.whatsappRemindersSent = {
+          ...user.whatsappRemindersSent,
+          twoDaysBefore: now,
+        };
+        await user.save();
+        console.log(`[ExpiryWorker] Sent 2-day reminder to student ${user.name} (${user.phone})`);
+      } catch (alertErr: any) {
+        console.warn(`[ExpiryWorker] Could not send 2-day reminder to ${user.name}:`, alertErr.message);
       }
     }
 
-    // 3. Expire Seat Assignments that have ended
+    // 3. Automated WhatsApp Notice: On / After Plan Expiry
+    const expiredUsers = await User.find({
+      planEndDate: { $lte: now },
+      'whatsappRemindersSent.onExpiry': { $exists: false },
+    })
+      .populate('currentSeat')
+      .populate('batchId')
+      .populate('currentPlan');
+
+    for (const user of expiredUsers) {
+      user.entryStatus = 'EXPIRED';
+      try {
+        await sendWhatsAppAlert({
+          adminId: user.adminId,
+          user,
+          templateKey: 'PLAN_EXPIRED',
+          sentBy: 'SYSTEM',
+        });
+
+        user.whatsappRemindersSent = {
+          ...user.whatsappRemindersSent,
+          onExpiry: now,
+        };
+        await user.save();
+        console.log(`[ExpiryWorker] Sent expired notice to student ${user.name} (${user.phone})`);
+      } catch (alertErr: any) {
+        console.warn(`[ExpiryWorker] Could not send expired notice to ${user.name}:`, alertErr.message);
+        await user.save();
+      }
+    }
+
+    // 4. Expire Seat Assignments that have ended
     const expiredAssignments = await SeatAssignment.find({
       status: 'ACTIVE',
       endDate: { $lt: now },
@@ -74,16 +113,18 @@ export async function runSubscriptionExpiryJob(): Promise<void> {
       assign.status = 'EXPIRED';
       await assign.save();
 
-      // Free seat
-      await Seat.findByIdAndUpdate(assign.seatId, {
-        status: 'AVAILABLE',
-        $unset: { assignedUserId: 1, assignedFrom: 1, assignedUntil: 1 },
+      // Check if any other active assignment exists for this seat
+      const otherActive = await SeatAssignment.countDocuments({
+        seatId: assign.seatId,
+        status: 'ACTIVE',
       });
 
-      // Remove seat reference from user
-      await User.findByIdAndUpdate(assign.userId, {
-        $unset: { currentSeat: 1 },
-      });
+      if (otherActive === 0) {
+        await Seat.findByIdAndUpdate(assign.seatId, {
+          status: 'AVAILABLE',
+          $unset: { assignedUserId: 1, assignedFrom: 1, assignedUntil: 1 },
+        });
+      }
     }
 
   } catch (error) {
@@ -98,4 +139,3 @@ export function startBackgroundJobs(): void {
   // Run every 10 minutes
   setInterval(runSubscriptionExpiryJob, 10 * 60 * 1000);
 }
-

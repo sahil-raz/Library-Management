@@ -3,15 +3,62 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Types } from 'mongoose';
 import { Admin } from '../models/Admin.js';
-import { User } from '../models/User.js';
 import { Branch } from '../models/Branch.js';
 import { UserPlan } from '../models/UserPlan.js';
 import { PaymentConfig } from '../models/PaymentConfig.js';
-import { adminRegisterSchema, userRegisterSchema } from '../validators/index.js';
+import { adminRegisterSchema, sendOtpSchema } from '../validators/index.js';
 import { ENV } from '../config/env.js';
 import { AuthUserPayload } from '../types/index.js';
 import { logAudit } from '../services/auditService.js';
-import { createNotification } from '../services/notificationService.js';
+import { sendWhatsAppOtp, verifyWhatsAppOtp } from '../services/whatsappService.js';
+
+// Send WhatsApp OTP for Admin Registration
+export async function sendAdminOtp(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parseResult = sendOtpSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.errors.map(e => e.message).join('. ');
+      res.status(400).json({ success: false, code: 'VALIDATION_ERROR', message: errorMsg });
+      return;
+    }
+
+    const { phone, email } = parseResult.data;
+
+    // Check if phone number already registered
+    const existingPhone = await Admin.findOne({ phone: phone.trim() });
+    if (existingPhone) {
+      res.status(409).json({
+        success: false,
+        code: 'PHONE_ALREADY_EXISTS',
+        message: 'An administrator account with this phone number already exists.',
+      });
+      return;
+    }
+
+    // Check if email already registered (if provided)
+    if (email) {
+      const existingEmail = await Admin.findOne({ email: email.trim().toLowerCase() });
+      if (existingEmail) {
+        res.status(409).json({
+          success: false,
+          code: 'EMAIL_ALREADY_EXISTS',
+          message: 'An administrator account with this email already exists.',
+        });
+        return;
+      }
+    }
+
+    const { waLink } = await sendWhatsAppOtp(phone.trim(), 'ADMIN_SIGNUP');
+
+    res.json({
+      success: true,
+      message: `WhatsApp OTP sent successfully to ${phone}. Enter the 6-digit code to verify.`,
+      waLink,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 export async function registerAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -28,12 +75,35 @@ export async function registerAdmin(req: Request, res: Response, next: NextFunct
     }
     const data = parseResult.data;
 
-    const existing = await Admin.findOne({ email: data.email });
-    if (existing) {
+    // Check unique email
+    const existingEmail = await Admin.findOne({ email: data.email });
+    if (existingEmail) {
       res.status(409).json({
         success: false,
         code: 'EMAIL_ALREADY_EXISTS',
         message: 'An administrator account with this email already exists.',
+      });
+      return;
+    }
+
+    // Check unique phone number
+    const existingPhone = await Admin.findOne({ phone: data.phone });
+    if (existingPhone) {
+      res.status(409).json({
+        success: false,
+        code: 'PHONE_ALREADY_EXISTS',
+        message: 'An administrator account with this phone number already exists.',
+      });
+      return;
+    }
+
+    // Verify WhatsApp OTP
+    const isOtpValid = await verifyWhatsAppOtp(data.phone, data.otp, 'ADMIN_SIGNUP');
+    if (!isOtpValid) {
+      res.status(400).json({
+        success: false,
+        code: 'INVALID_OTP',
+        message: 'Invalid or expired WhatsApp OTP. Please request a new OTP.',
       });
       return;
     }
@@ -45,10 +115,11 @@ export async function registerAdmin(req: Request, res: Response, next: NextFunct
       name: data.name,
       email: data.email,
       phone: data.phone,
-      whatsappNumber: data.whatsappNumber,
+      whatsappNumber: data.whatsappNumber || data.phone,
       password: hashedPassword,
       organizationName: data.organizationName,
       status: 'ACTIVE',
+      whatsappAlertsUsed: 0,
     });
 
     // Create default payment configuration for the admin (safe failover if already exists)
@@ -100,6 +171,7 @@ export async function registerAdmin(req: Request, res: Response, next: NextFunct
         id: admin._id,
         name: admin.name,
         email: admin.email,
+        phone: admin.phone,
         role: 'ADMIN',
         organizationName: admin.organizationName,
       },
@@ -109,119 +181,13 @@ export async function registerAdmin(req: Request, res: Response, next: NextFunct
   }
 }
 
-export async function registerUser(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parseResult = userRegisterSchema.safeParse(req.body);
-    if (!parseResult.success) {
-      const errorMsg = parseResult.error.errors.map(e => e.message).join('. ');
-      res.status(400).json({
-        success: false,
-        code: 'VALIDATION_ERROR',
-        message: errorMsg || 'Invalid registration details',
-        errors: parseResult.error.errors,
-      });
-      return;
-    }
-    const data = parseResult.data;
-
-    const adminObjectId = new Types.ObjectId(data.adminId);
-    const admin = await Admin.findById(adminObjectId);
-    if (!admin) {
-      res.status(404).json({
-        success: false,
-        code: 'LIBRARY_NOT_FOUND',
-        message: 'The selected library does not exist.',
-      });
-      return;
-    }
-
-    const existing = await User.findOne({ adminId: adminObjectId, email: data.email });
-    if (existing) {
-      res.status(409).json({
-        success: false,
-        code: 'EMAIL_ALREADY_EXISTS',
-        message: 'A student/patron with this email already exists in this library.',
-      });
-      return;
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(data.password, salt);
-
-    const user = await User.create({
-      adminId: adminObjectId,
-      branchId: data.branchId ? new Types.ObjectId(data.branchId) : undefined,
-      name: data.name,
-      email: data.email,
-      phone: data.phone,
-      whatsappNumber: data.whatsappNumber,
-      dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
-      address: data.address,
-      emergencyContact: data.emergencyContact,
-      photo: data.photo,
-      password: hashedPassword,
-      entryStatus: 'NONE',
-    });
-
-    try {
-      await logAudit({
-        actorId: user._id,
-        actorRole: 'USER',
-        actorName: user.name,
-        adminId: admin._id,
-        branchId: user.branchId,
-        action: 'USER_CREATED',
-        target: 'User',
-        targetId: user._id.toString(),
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-      });
-    } catch (auditErr) {
-      console.warn('⚠️ [Audit] Warning logging user creation:', auditErr);
-    }
-
-    // Notify admin
-    try {
-      await createNotification({
-        recipientRole: 'ADMIN',
-        recipientId: admin._id,
-        title: 'New Member Registered',
-        message: `${user.name} has registered for ${admin.organizationName}.`,
-        type: 'SYSTEM',
-      });
-    } catch (notifErr) {
-      console.warn('⚠️ [Notification] Warning creating registration notification:', notifErr);
-    }
-
-    const payload: AuthUserPayload = {
-      id: user._id.toString(),
-      email: user.email,
-      role: 'USER',
-      name: user.name,
-      adminId: admin._id.toString(),
-      branchId: user.branchId?.toString(),
-    };
-
-    const token = jwt.sign(payload, ENV.JWT_SECRET, {
-      expiresIn: ENV.JWT_EXPIRES_IN as any,
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: 'USER',
-        adminId: admin._id,
-        branchId: user.branchId,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
+// User self-registration disabled as users are managed by Admin without credentials
+export async function registerUser(_req: Request, res: Response): Promise<void> {
+  res.status(403).json({
+    success: false,
+    code: 'FEATURE_DISABLED',
+    message: 'Student self-registration is disabled. Students are added and managed directly by the Library Administration.',
+  });
 }
 
 export async function getPublicLibraries(_req: Request, res: Response): Promise<void> {

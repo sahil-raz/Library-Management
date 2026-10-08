@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Copy, Check, Upload, QrCode, ArrowRight, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Copy, Check, Upload, QrCode, ArrowRight, ShieldCheck, CheckCircle2, Clock, AlertTriangle } from 'lucide-react';
 import { api } from '../../api/client.js';
 import { Header } from '../../components/common/Header.js';
 import { Input } from '../../components/common/Input.js';
@@ -14,6 +14,7 @@ export const SaaSPurchase: React.FC = () => {
   const [plans, setPlans] = useState<any[]>([]);
   const [currentPlanId, setCurrentPlanId] = useState<string | null>(null);
   const [currentSubscription, setCurrentSubscription] = useState<any>(null);
+  const [pendingPayment, setPendingPayment] = useState<any>(null);
   const [paymentConfig, setPaymentConfig] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -25,19 +26,32 @@ export const SaaSPurchase: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedUpi, setCopiedUpi] = useState(false);
 
-  useEffect(() => {
+  const fetchPlans = () => {
+    setLoading(true);
     api
-      .get<{ success: boolean; plans: any[]; currentPlanId?: string; currentSubscription?: any; paymentConfig: any }>('/admin/saas-plans')
+      .get<{
+        success: boolean;
+        plans: any[];
+        currentPlanId?: string;
+        currentSubscription?: any;
+        pendingPayment?: any;
+        paymentConfig: any;
+      }>('/admin/saas-plans')
       .then((res) => {
         if (res.success) {
           setPlans(res.plans);
           setCurrentPlanId(res.currentPlanId || null);
           setCurrentSubscription(res.currentSubscription || null);
+          setPendingPayment(res.pendingPayment || null);
           setPaymentConfig(res.paymentConfig);
         }
       })
       .catch((err) => showToast(err.message || 'Failed to fetch subscription plans', 'error'))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchPlans();
   }, []);
 
   const handleCopyUpi = () => {
@@ -73,6 +87,11 @@ export const SaaSPurchase: React.FC = () => {
       return;
     }
 
+    if (pendingPayment) {
+      showToast('You already have a payment request pending review. Cannot send a new one.', 'error');
+      return;
+    }
+
     try {
       setIsSubmitting(true);
       await api.post('/admin/saas-plans/purchase', {
@@ -85,6 +104,7 @@ export const SaaSPurchase: React.FC = () => {
       setSelectedPlan(null);
       setUtr('');
       setScreenshotUrl('');
+      fetchPlans();
       navigate('/admin');
     } catch (err: any) {
       showToast(err.message || 'Payment submission failed', 'error');
@@ -94,7 +114,7 @@ export const SaaSPurchase: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-50 pb-8">
+    <div className="flex-1 flex flex-col bg-slate-50 pb-8 min-h-screen">
       <Header
         title="My SaaS Subscription"
         subtitle="Library Platform License & Tier Limits"
@@ -102,6 +122,23 @@ export const SaaSPurchase: React.FC = () => {
       />
 
       <div className="p-4 flex flex-col gap-4">
+        {/* Pending Payment Alert Banner */}
+        {pendingPayment && (
+          <div className="p-4 rounded-3xl bg-amber-500 text-white shadow-ios flex items-start gap-3">
+            <Clock className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-200" />
+            <div className="flex-1 text-xs">
+              <h4 className="font-bold text-sm text-white">Payment Verification in Progress</h4>
+              <p className="text-amber-100 mt-0.5">
+                Your payment request of <strong>₹{pendingPayment.amount}</strong> for <strong>{pendingPayment.planName}</strong> (UTR: <code>{pendingPayment.utr}</code>) submitted on{' '}
+                {new Date(pendingPayment.submittedAt || pendingPayment.createdAt).toLocaleDateString()} is awaiting Super Admin verification.
+              </p>
+              <p className="text-amber-200 text-[11px] mt-1 font-semibold">
+                ⚠️ You cannot submit a new payment request until this request is accepted or denied.
+              </p>
+            </div>
+          </div>
+        )}
+
         {currentSubscription && (
           <div className="p-4 rounded-3xl bg-gradient-to-r from-emerald-600 to-teal-700 text-white shadow-ios flex items-center justify-between">
             <div>
@@ -129,6 +166,8 @@ export const SaaSPurchase: React.FC = () => {
           <div className="flex flex-col gap-4">
             {plans.map((plan) => {
               const isCurrent = currentPlanId === plan._id;
+              const hasPending = !!pendingPayment;
+
               return (
                 <div
                   key={plan._id}
@@ -165,6 +204,15 @@ export const SaaSPurchase: React.FC = () => {
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                         Current
                       </button>
+                    ) : hasPending ? (
+                      <button
+                        disabled
+                        title="Previous payment request pending review"
+                        className="px-3.5 py-2 rounded-2xl bg-amber-50 text-amber-700 font-bold text-xs border border-amber-200 cursor-not-allowed flex items-center gap-1.5 opacity-80"
+                      >
+                        <Clock className="w-3.5 h-3.5" />
+                        Pending Review
+                      </button>
                     ) : (
                       <ShimmerButton onClick={() => setSelectedPlan(plan)} size="sm">
                         {currentPlanId ? 'Switch Plan' : 'Select Plan'}
@@ -176,9 +224,9 @@ export const SaaSPurchase: React.FC = () => {
                     <span>✓ {plan.maxBranches} Branches</span>
                     <span>✓ {plan.maxManagers} Staff Managers</span>
                     <span>✓ {plan.maxUsers} Students/Patrons</span>
-                    <span>✓ {plan.maxSeats} Total Seats</span>
+                    <span>✓ {plan.maxSeats} Total Desks</span>
                     <span>✓ {plan.maxMessages} WhatsApp Alerts</span>
-                    <span>✓ Queue Management</span>
+                    <span>✓ Queue System</span>
                   </div>
                 </div>
               );

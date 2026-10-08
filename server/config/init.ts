@@ -26,7 +26,7 @@ export async function initializeSystem(): Promise<void> {
       await PaymentConfig.create({
         scope: 'SUPERADMIN',
         upiId: 'superadmin@upi',
-        paymentName: 'Libr Platform',
+        paymentName: 'Aapka Library',
         paymentInstructions: 'Transfer the plan subscription fee to the UPI ID or scan QR code. Then submit your 12-digit UTR and payment screenshot for instant account approval.',
       });
     }

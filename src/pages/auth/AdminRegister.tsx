@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Building, User, Mail, Phone, Lock, ArrowRight } from 'lucide-react';
+import { Building, User, Mail, Phone, Lock, ArrowRight, MessageSquare, CheckCircle2, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client.js';
 import { useAuth } from '../../context/AuthContext.js';
 import { useToast } from '../../context/ToastContext.js';
@@ -19,16 +19,44 @@ export const AdminRegister: React.FC = () => {
     organizationName: '',
     email: '',
     phone: '',
-    whatsappNumber: '',
     password: '',
     confirmPassword: '',
+    otp: '',
   });
 
   const [isLoading, setIsLoading] = useState(false);
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
+  const [otpSent, setOtpSent] = useState(false);
   const [error, setError] = useState('');
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSendOtp = async () => {
+    if (!formData.phone || formData.phone.length < 10) {
+      setError('Please enter a valid 10-digit phone number first.');
+      showToast('Enter a valid phone number', 'error');
+      return;
+    }
+
+    try {
+      setIsSendingOtp(true);
+      setError('');
+      const res = await api.post<{ success: boolean; message: string }>(
+        '/public/admin/send-otp',
+        { phone: formData.phone, email: formData.email }
+      );
+
+      setOtpSent(true);
+      showToast(res.message || 'WhatsApp OTP sent successfully!', 'success');
+    } catch (err: any) {
+      setError(err.message || 'Failed to send WhatsApp OTP');
+      showToast(err.message || 'Failed to send WhatsApp OTP', 'error');
+    } finally {
+      setIsSendingOtp(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -38,20 +66,29 @@ export const AdminRegister: React.FC = () => {
       return;
     }
 
+    if (!formData.otp) {
+      setError('Please enter the 6-digit WhatsApp verification OTP.');
+      showToast('WhatsApp OTP is required', 'error');
+      return;
+    }
+
     try {
       setIsLoading(true);
       setError('');
 
       const res = await api.post<{ success: boolean; token: string; user: any }>(
         '/public/admin/register',
-        formData
+        {
+          ...formData,
+          whatsappNumber: formData.phone,
+        }
       );
 
       if (res.token) {
         api.setToken(res.token);
         await refreshUser();
-        showToast('Account created! Now select a plan to activate your library.', 'success');
-        navigate('/admin/plans');
+        showToast('Library registered! Now choose a SaaS plan to activate.', 'success');
+        navigate('/admin/saas-purchase');
       }
     } catch (err: any) {
       setError(err.message || 'Registration failed');
@@ -62,21 +99,21 @@ export const AdminRegister: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-50 pb-6">
+    <div className="flex-1 flex flex-col bg-slate-50 pb-8 min-h-screen">
       <SEO
         title="Register Library"
-        description="Register your library organization to start managing branches, seats, staff, and student memberships."
+        description="Register your library organization to start managing branches, seats, session timings, and student memberships."
       />
       <Header title="Library Registration" showBack onBack={() => navigate('/login')} />
 
-      <div className="p-6 flex-1 flex flex-col justify-center">
-        <div className="text-center mb-6">
-          <div className="w-12 h-12 rounded-2xl bg-ios-blue/10 text-ios-blue flex items-center justify-center mx-auto mb-2">
-            <Building className="w-6 h-6" />
+      <div className="p-4 max-w-lg mx-auto w-full flex-1 flex flex-col justify-center">
+        <div className="text-center mb-5">
+          <div className="w-14 h-14 rounded-3xl bg-ios-blue/10 text-ios-blue flex items-center justify-center mx-auto mb-2.5 shadow-sm">
+            <Building className="w-7 h-7" />
           </div>
-          <h2 className="text-xl font-bold text-slate-900">Register Your Library</h2>
+          <h2 className="text-xl font-black text-slate-900 tracking-tight">Register Your Library</h2>
           <p className="text-xs text-slate-500 mt-1">
-            Register your library organization to start managing branches, seats, and members.
+            Create an administrator account with verified phone and manage your study spaces.
           </p>
         </div>
 
@@ -86,7 +123,7 @@ export const AdminRegister: React.FC = () => {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3.5 bg-white p-5 rounded-3xl border border-slate-200 shadow-ios">
           <Input
             label="Library / Organization Name"
             name="organizationName"
@@ -98,7 +135,7 @@ export const AdminRegister: React.FC = () => {
           />
 
           <Input
-            label="Owner / Admin Full Name"
+            label="Admin Full Name"
             name="name"
             placeholder="e.g. Rahul Sharma"
             value={formData.name}
@@ -118,58 +155,98 @@ export const AdminRegister: React.FC = () => {
             required
           />
 
-          <div className="grid grid-cols-2 gap-2">
+          {/* Single Phone Number (WhatsApp-enabled) with OTP Trigger */}
+          <div className="space-y-2">
             <Input
               label="Phone Number"
               name="phone"
               type="tel"
-              placeholder="9876543210"
+              placeholder="10-digit WhatsApp number"
               value={formData.phone}
               onChange={handleChange}
               icon={<Phone className="w-4 h-4" />}
               required
             />
 
+            {/* OTP Trigger Button */}
+            <div className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                onClick={handleSendOtp}
+                disabled={isSendingOtp || !formData.phone}
+                className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl px-3 py-1.5 flex items-center gap-1.5 active:scale-95 transition-all disabled:opacity-50"
+              >
+                {isSendingOtp ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Sending OTP...
+                  </>
+                ) : (
+                  <>
+                    <MessageSquare className="w-3.5 h-3.5" /> {otpSent ? 'Resend WhatsApp OTP' : 'Send WhatsApp OTP'}
+                  </>
+                )}
+              </button>
+
+              {otpSent && (
+                <span className="text-[11px] font-semibold text-emerald-600 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> OTP Sent to WhatsApp
+                </span>
+              )}
+            </div>
+
+            {/* OTP Input Field */}
+            {otpSent && (
+              <div className="pt-1">
+                <Input
+                  label="Enter 6-Digit WhatsApp OTP"
+                  name="otp"
+                  type="text"
+                  placeholder="e.g. 123456"
+                  value={formData.otp}
+                  onChange={handleChange}
+                  icon={<Lock className="w-4 h-4 text-emerald-600" />}
+                  required
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
             <Input
-              label="WhatsApp Number"
-              name="whatsappNumber"
-              type="tel"
-              placeholder="9876543210"
-              value={formData.whatsappNumber}
+              label="Password"
+              name="password"
+              type="password"
+              placeholder="••••••••"
+              value={formData.password}
               onChange={handleChange}
-              icon={<Phone className="w-4 h-4" />}
+              icon={<Lock className="w-4 h-4" />}
+              required
+            />
+
+            <Input
+              label="Confirm Password"
+              name="confirmPassword"
+              type="password"
+              placeholder="••••••••"
+              value={formData.confirmPassword}
+              onChange={handleChange}
+              icon={<Lock className="w-4 h-4" />}
               required
             />
           </div>
 
-          <Input
-            label="Password"
-            name="password"
-            type="password"
-            placeholder="••••••••"
-            value={formData.password}
-            onChange={handleChange}
-            icon={<Lock className="w-4 h-4" />}
-            required
-          />
-
-          <Input
-            label="Confirm Password"
-            name="confirmPassword"
-            type="password"
-            placeholder="••••••••"
-            value={formData.confirmPassword}
-            onChange={handleChange}
-            icon={<Lock className="w-4 h-4" />}
-            required
-          />
-
-          <ShimmerButton type="submit" size="lg" isLoading={isLoading} className="w-full mt-3">
-            Register & Continue <ArrowRight className="w-4 h-4 ml-1" />
+          <ShimmerButton
+            type="submit"
+            size="lg"
+            isLoading={isLoading}
+            className="w-full mt-2"
+            disabled={!otpSent}
+          >
+            {otpSent ? 'Verify OTP & Register' : 'Send WhatsApp OTP to Continue'} <ArrowRight className="w-4 h-4 ml-1" />
           </ShimmerButton>
         </form>
 
-        <div className="text-center mt-6">
+        <div className="text-center mt-5">
           <Link to="/login" className="text-xs text-slate-500 hover:text-slate-800">
             Already have an account? <span className="font-semibold text-ios-blue">Sign In</span>
           </Link>

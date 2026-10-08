@@ -91,26 +91,26 @@ export async function createBranchUser(req: AuthenticatedRequest, res: Response)
 
   const data = userRegisterSchema.parse({ ...req.body, adminId: adminId.toString(), branchId: branchId.toString() });
 
-  const existing = await User.findOne({ adminId, email: data.email });
+  const existing = await User.findOne({ adminId, phone: data.phone });
   if (existing) {
-    res.status(409).json({ success: false, code: 'EMAIL_EXISTS', message: 'User already exists' });
+    res.status(409).json({ success: false, code: 'PHONE_EXISTS', message: 'Student with this phone number already exists' });
     return;
   }
-
-  const salt = await bcrypt.genSalt(10);
-  const hashedPassword = await bcrypt.hash(data.password, salt);
 
   const user = await User.create({
     adminId,
     branchId,
     name: data.name,
-    email: data.email,
     phone: data.phone,
-    whatsappNumber: data.whatsappNumber,
-    dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
+    whatsappNumber: data.phone,
+    classCourse: data.classCourse,
     address: data.address,
-    emergencyContact: data.emergencyContact,
-    password: hashedPassword,
+    photo: data.photo,
+    parentName: data.parentName || 'Parent',
+    parentPhone: data.parentPhone || data.phone,
+    aadharNumber: data.aadharNumber,
+    dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
+    gender: data.gender || 'Male',
     entryStatus: 'ACTIVE',
   });
 

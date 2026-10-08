@@ -111,7 +111,7 @@ async function setupFrontend(): Promise<void> {
 // Server startup sequence
 async function startServer(): Promise<void> {
   try {
-    console.log('🚀 Starting Libr Multi-Library Unified Server...');
+    console.log('🚀 Starting Multi-Library Unified Server...');
     await connectDB();
     await initializeSystem();
     startBackgroundJobs();
@@ -119,7 +119,7 @@ async function startServer(): Promise<void> {
 
     server.listen(ENV.PORT, () => {
       console.log(`\n======================================================`);
-      console.log(`  🎉 Libr Server running on port ${ENV.PORT}`);
+      console.log(`  🎉 Server running on port ${ENV.PORT}`);
       console.log(`  🌐 App & Client: http://localhost:${ENV.PORT}`);
       console.log(`  🌐 API Base URL: http://localhost:${ENV.PORT}/api`);
       console.log(`  🔐 SuperAdmin:   ${ENV.SUPERADMIN_EMAIL}`);
@@ -127,7 +127,7 @@ async function startServer(): Promise<void> {
     });
 
     const shutdown = async () => {
-      console.log('\n🛑 Gracefully shutting down Libr Server...');
+      console.log('\n🛑 Gracefully shutting down Server...');
       setShuttingDown(true);
       server.close(async () => {
         console.log('✅ HTTP server closed.');
